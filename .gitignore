@@ -2,7 +2,6 @@
 minerva
 
 # Environment
-.env
 .env.local
 
 # IDE
