@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // ResendAttachment represents an email attachment
@@ -71,7 +72,10 @@ func (w *WebhookServer) Start() error {
 	// Agent WebSocket endpoint
 	if w.agentHub != nil {
 		http.HandleFunc("/agent", w.agentHub.HandleWebSocket)
+		http.HandleFunc("/agent/list", w.handleAgentList)
+		http.HandleFunc("/agent/run", w.handleAgentRun)
 		log.Println("Agent WebSocket endpoint: /agent")
+		log.Println("Agent API endpoints: /agent/list, /agent/run")
 	}
 
 	addr := fmt.Sprintf(":%d", w.port)
@@ -82,6 +86,86 @@ func (w *WebhookServer) Start() error {
 func (w *WebhookServer) handleHealth(rw http.ResponseWriter, r *http.Request) {
 	rw.WriteHeader(http.StatusOK)
 	rw.Write([]byte("OK"))
+}
+
+// handleAgentList returns list of connected agents and their projects
+func (w *WebhookServer) handleAgentList(rw http.ResponseWriter, r *http.Request) {
+	if w.agentHub == nil {
+		http.Error(rw, `{"error": "agent hub not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	agents := w.agentHub.ListAgents()
+	result := make(map[string]interface{})
+
+	for _, agent := range agents {
+		name, _ := agent["name"].(string)
+		workDir, _ := agent["workDir"].(string)
+		if name == "" {
+			continue
+		}
+
+		// Get projects for this agent
+		projects, err := w.agentHub.GetProjects(name, 5*time.Second)
+		if err != nil {
+			result[name] = map[string]interface{}{
+				"workDir":  workDir,
+				"projects": []string{},
+				"error":    err.Error(),
+			}
+		} else {
+			result[name] = map[string]interface{}{
+				"workDir":  workDir,
+				"projects": projects,
+			}
+		}
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(result)
+}
+
+// handleAgentRun executes a task on an agent
+func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(rw, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if w.agentHub == nil {
+		http.Error(rw, `{"error": "agent hub not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		Agent  string `json:"agent"`
+		Prompt string `json:"prompt"`
+		Dir    string `json:"dir,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(rw, `{"error": "invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.Agent == "" || req.Prompt == "" {
+		http.Error(rw, `{"error": "agent and prompt are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	result, err := w.agentHub.SendTask(req.Agent, req.Prompt, req.Dir, 10*time.Minute)
+	if err != nil {
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(rw).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(map[string]interface{}{
+		"output": result.Output,
+		"error":  result.Error,
+	})
 }
 
 // verifySignature verifies the Svix webhook signature

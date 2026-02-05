@@ -779,6 +779,14 @@ func (b *Bot) chatWithAI(messages []ChatMessage, systemPrompt string, userID, co
 		systemPrompt = systemPrompt + "\n\n[USER MEMORY - Important information about this user]\n" + memory
 	}
 
+	// Inject connected agents and their projects
+	if b.agentHub != nil {
+		agentInfo := b.getAgentProjectsContext()
+		if agentInfo != "" {
+			systemPrompt = systemPrompt + "\n\n" + agentInfo
+		}
+	}
+
 	for range 10 {
 		b.sendTypingAction(userID) // Keep typing indicator
 
@@ -864,4 +872,45 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// getAgentProjectsContext returns a formatted string with connected agents and their projects
+func (b *Bot) getAgentProjectsContext() string {
+	if b.agentHub == nil {
+		return ""
+	}
+
+	agents := b.agentHub.ListAgents()
+	if len(agents) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[CONNECTED AGENTS AND PROJECTS]\n")
+	sb.WriteString("You can use the run_claude tool to execute tasks on these agents.\n\n")
+
+	for _, agent := range agents {
+		agentName, _ := agent["name"].(string)
+		workDir, _ := agent["workDir"].(string)
+		if agentName == "" {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("Agent: %s (working dir: %s)\n", agentName, workDir))
+
+		// Get projects with a short timeout
+		projects, err := b.agentHub.GetProjects(agentName, 5*time.Second)
+		if err != nil {
+			sb.WriteString("  Projects: (failed to retrieve)\n")
+		} else if len(projects) == 0 {
+			sb.WriteString("  Projects: (none found)\n")
+		} else {
+			sb.WriteString("  Projects:\n")
+			for _, proj := range projects {
+				sb.WriteString(fmt.Sprintf("    - %s\n", proj))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }

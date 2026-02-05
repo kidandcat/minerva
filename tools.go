@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 
 	"minerva/tools"
 )
@@ -24,6 +25,8 @@ func NewToolExecutor(db *sql.DB, userID int64) *ToolExecutor {
 
 // Execute runs a tool by name with the given arguments
 func (t *ToolExecutor) Execute(name string, arguments string, bot *Bot) (string, error) {
+	log.Printf("[TOOL] Executing tool: %s with args: %s", name, arguments)
+	defer log.Printf("[TOOL] Finished tool: %s", name)
 	switch name {
 	case "create_reminder":
 		return tools.CreateReminder(t.db, t.userID, arguments)

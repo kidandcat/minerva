@@ -1,35 +1,31 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
+	"os"
+	"os/exec"
 	"strings"
-	"time"
 )
 
-// AIClient handles communication with OpenRouter API
+// AIClient handles communication with Claude CLI
 type AIClient struct {
-	apiKey     string
-	httpClient *http.Client
-	baseURL    string
-	models     []string // Priority order
+	workspaceDir string
 }
 
 // ChatMessage represents a message in the conversation
 type ChatMessage struct {
 	Role       string      `json:"role"`                   // "system", "user", "assistant", "tool"
 	Content    interface{} `json:"content"`                // string or []ContentPart for multimodal
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"` // For tool responses
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`   // Kept for compatibility but unused
+	ToolCallID string      `json:"tool_call_id,omitempty"` // Kept for compatibility but unused
 }
 
 // ContentPart represents a part of multimodal content
 type ContentPart struct {
-	Type     string    `json:"type"`               // "text" or "image_url"
+	Type     string    `json:"type"` // "text" or "image_url"
 	Text     string    `json:"text,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
 }
@@ -39,7 +35,7 @@ type ImageURL struct {
 	URL string `json:"url"` // "data:image/jpeg;base64,..." or URL
 }
 
-// ToolCall represents a tool call made by the assistant
+// ToolCall represents a tool call made by the assistant (kept for compatibility)
 type ToolCall struct {
 	ID       string       `json:"id"`
 	Type     string       `json:"type"` // "function"
@@ -52,7 +48,7 @@ type ToolCallFunc struct {
 	Arguments string `json:"arguments"` // JSON string
 }
 
-// Tool represents a tool available to the assistant
+// Tool represents a tool available to the assistant (kept for compatibility)
 type Tool struct {
 	Type     string       `json:"type"` // "function"
 	Function ToolFunction `json:"function"`
@@ -65,197 +61,208 @@ type ToolFunction struct {
 	Parameters  map[string]any `json:"parameters"` // JSON Schema
 }
 
-// ChatResponse represents the API response
-type ChatResponse struct {
-	ID      string `json:"id"`
-	Choices []struct {
-		Message      ChatMessage `json:"message"`
-		FinishReason string      `json:"finish_reason"`
-	} `json:"choices"`
-	Error *struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    any    `json:"code"` // Can be string or int
-	} `json:"error,omitempty"`
-}
-
-// chatRequest represents the request body for the chat API
-type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Tools    []Tool        `json:"tools,omitempty"`
-}
-
-// DefaultModels is the default model hierarchy (highest priority first)
-// :online suffix enables native web search
-var DefaultModels = []string{
-	"x-ai/grok-4.1-fast:online",
-	"google/gemini-3-flash-preview:online",
-}
-
-// NewAIClient creates a new AI client for OpenRouter
-func NewAIClient(apiKey string, models []string) *AIClient {
-	if len(models) == 0 {
-		models = DefaultModels
-	}
-	return &AIClient{
-		apiKey: apiKey,
-		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
-		},
-		baseURL: "https://openrouter.ai/api/v1",
-		models:  models,
-	}
-}
-
 // ChatResult contains the response and metadata
 type ChatResult struct {
 	Message *ChatMessage
 	Model   string
 }
 
-// Chat sends a chat completion request with automatic fallback
-func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Tool) (*ChatResult, error) {
-	// Base system prompt
-	basePrompt := "You are Minerva, a helpful personal AI assistant. You can help with reminders, notes, and general conversation."
-	finalSystemPrompt := basePrompt
-	if systemPrompt != "" {
-		finalSystemPrompt = basePrompt + "\n\n" + systemPrompt
+// ClaudeStreamEvent represents an event from Claude CLI's stream-json output
+type ClaudeStreamEvent struct {
+	Type    string `json:"type"`
+	Message string `json:"message,omitempty"`
+	// For result events
+	Subtype      string  `json:"subtype,omitempty"`
+	Result       string  `json:"result,omitempty"`
+	DurationMS   float64 `json:"duration_ms,omitempty"`
+	DurationAPI  float64 `json:"duration_api_ms,omitempty"`
+	IsError      bool    `json:"is_error,omitempty"`
+	SessionID    string  `json:"session_id,omitempty"`
+	TotalCost    float64 `json:"total_cost,omitempty"`
+	InputTokens  int     `json:"input_tokens,omitempty"`
+	OutputTokens int     `json:"output_tokens,omitempty"`
+}
+
+// NewAIClient creates a new AI client using Claude CLI
+func NewAIClient(apiKey string, models []string) *AIClient {
+	// apiKey and models are ignored - Claude CLI uses its own config
+	workspaceDir := os.Getenv("MINERVA_WORKSPACE")
+	if workspaceDir == "" {
+		workspaceDir = "./workspace"
 	}
 
-	// Prepend system prompt
-	allMessages := append([]ChatMessage{{
-		Role:    "system",
-		Content: finalSystemPrompt,
-	}}, messages...)
+	return &AIClient{
+		workspaceDir: workspaceDir,
+	}
+}
 
-	var lastErr error
-	for _, model := range c.models {
-		resp, err := c.chatWithModel(model, allMessages, tools)
-		if err == nil {
-			return &ChatResult{Message: resp, Model: model}, nil
-		}
+// Chat sends a chat completion request using Claude CLI
+func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Tool) (*ChatResult, error) {
+	log.Printf("[AI] Chat called with %d messages (using Claude CLI)", len(messages))
 
-		// Check if error is retryable (availability, rate limit, unsupported input)
-		if isRetryableError(err) {
-			log.Printf("Model %s failed with retryable error: %v, trying next model", model, err)
-			lastErr = err
-			continue
-		}
+	// Build the prompt from conversation history
+	prompt := c.buildPrompt(messages, systemPrompt)
 
-		// Non-retryable error, return immediately
+	// Execute claude CLI
+	result, err := c.executeClaude(prompt)
+	if err != nil {
 		return nil, err
 	}
 
-	return nil, fmt.Errorf("all models failed, last error: %w", lastErr)
+	return &ChatResult{
+		Message: &ChatMessage{
+			Role:    "assistant",
+			Content: result,
+		},
+		Model: "claude-cli",
+	}, nil
 }
 
-// chatWithModel sends a request to a specific model
-func (c *AIClient) chatWithModel(model string, messages []ChatMessage, tools []Tool) (*ChatMessage, error) {
-	reqBody := chatRequest{
-		Model:    model,
-		Messages: messages,
-		Tools:    tools,
-	}
+// buildPrompt constructs the prompt from messages and system prompt
+func (c *AIClient) buildPrompt(messages []ChatMessage, systemPrompt string) string {
+	var parts []string
 
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("HTTP-Referer", "https://github.com/kidandcat/minerva")
-	req.Header.Set("X-Title", "Minerva")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, &RetryableError{Err: fmt.Errorf("failed to send request: %w", err)}
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	// Handle HTTP errors
-	if resp.StatusCode != http.StatusOK {
-		// 429 = rate limit, 503 = service unavailable, 502 = bad gateway
-		if resp.StatusCode == 429 || resp.StatusCode == 503 || resp.StatusCode == 502 {
-			return nil, &RetryableError{Err: fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))}
+	// Add context header if there's history
+	if len(messages) > 1 {
+		parts = append(parts, "## Conversation History")
+		for _, msg := range messages[:len(messages)-1] {
+			content := extractContent(msg.Content)
+			if content == "" {
+				continue
+			}
+			switch msg.Role {
+			case "user":
+				parts = append(parts, fmt.Sprintf("User: %s", content))
+			case "assistant":
+				parts = append(parts, fmt.Sprintf("Assistant: %s", content))
+			case "system":
+				// Skip system messages in history, they're handled separately
+			}
 		}
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		parts = append(parts, "\n## Current Request")
 	}
 
-	var chatResp ChatResponse
-	if err := json.Unmarshal(body, &chatResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	// Add the last user message as the main prompt
+	if len(messages) > 0 {
+		lastMsg := messages[len(messages)-1]
+		content := extractContent(lastMsg.Content)
+		parts = append(parts, content)
 	}
 
-	// Check for API errors in response
-	if chatResp.Error != nil {
-		errMsg := chatResp.Error.Message
-		// Check for common retryable error patterns
-		if isRetryableErrorMessage(errMsg) {
-			return nil, &RetryableError{Err: fmt.Errorf("API error: %s", errMsg)}
+	return strings.Join(parts, "\n")
+}
+
+// extractContent gets the text content from a ChatMessage content field
+func extractContent(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		// Handle multimodal content - extract text parts
+		var texts []string
+		for _, part := range v {
+			if partMap, ok := part.(map[string]interface{}); ok {
+				if partMap["type"] == "text" {
+					if text, ok := partMap["text"].(string); ok {
+						texts = append(texts, text)
+					}
+				}
+			}
 		}
-		return nil, fmt.Errorf("API error: %s (type: %s)", errMsg, chatResp.Error.Type)
+		return strings.Join(texts, "\n")
+	default:
+		return fmt.Sprintf("%v", content)
+	}
+}
+
+// executeClaude runs the claude CLI and returns the result
+func (c *AIClient) executeClaude(prompt string) (string, error) {
+	// Ensure workspace directory exists
+	if err := os.MkdirAll(c.workspaceDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create workspace directory: %w", err)
 	}
 
-	if len(chatResp.Choices) == 0 {
-		return nil, &RetryableError{Err: fmt.Errorf("no choices returned in response")}
+	args := []string{
+		"-p",
+		"--continue",
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"--verbose",
+		prompt,
 	}
 
-	return &chatResp.Choices[0].Message, nil
-}
+	log.Printf("[AI] Executing claude CLI in %s", c.workspaceDir)
 
-// RetryableError indicates an error that should trigger model fallback
-type RetryableError struct {
-	Err error
-}
+	cmd := exec.Command("claude", args...)
+	cmd.Dir = c.workspaceDir
 
-func (e *RetryableError) Error() string {
-	return e.Err.Error()
-}
-
-func (e *RetryableError) Unwrap() error {
-	return e.Err
-}
-
-// isRetryableError checks if an error should trigger model fallback
-func isRetryableError(err error) bool {
-	if err == nil {
-		return false
+	// Get stdout pipe for streaming output
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stdout pipe: %w", err)
 	}
-	_, ok := err.(*RetryableError)
-	return ok
-}
 
-// isRetryableErrorMessage checks common retryable error patterns
-func isRetryableErrorMessage(msg string) bool {
-	msg = strings.ToLower(msg)
-	retryablePatterns := []string{
-		"rate limit",
-		"overloaded",
-		"capacity",
-		"unavailable",
-		"timeout",
-		"temporarily",
-		"too many requests",
-		"image",      // Unsupported image input
-		"multimodal", // Unsupported multimodal
-		"vision",     // Unsupported vision
+	// Capture stderr for debugging
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stderr pipe: %w", err)
 	}
-	for _, pattern := range retryablePatterns {
-		if strings.Contains(msg, pattern) {
-			return true
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("failed to start claude CLI: %w", err)
+	}
+
+	// Read stderr in background
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			log.Printf("[Claude stderr] %s", scanner.Text())
+		}
+	}()
+
+	// Parse stream-json output
+	var result string
+	scanner := bufio.NewScanner(stdout)
+	// Increase buffer size for large outputs
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024) // 1MB max
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var event ClaudeStreamEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			log.Printf("[AI] Failed to parse event: %s", line)
+			continue
+		}
+
+		// Look for the result event
+		if event.Type == "result" {
+			result = event.Result
+			log.Printf("[AI] Got result (cost: $%.4f, tokens: %d in / %d out)",
+				event.TotalCost, event.InputTokens, event.OutputTokens)
 		}
 	}
-	return false
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("[AI] Scanner error: %v", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		// If we got a result, don't fail even if exit code is non-zero
+		if result != "" {
+			log.Printf("[AI] Claude exited with error but got result: %v", err)
+		} else {
+			return "", fmt.Errorf("claude CLI failed: %w", err)
+		}
+	}
+
+	if result == "" {
+		return "", fmt.Errorf("no result received from claude CLI")
+	}
+
+	return result, nil
 }
