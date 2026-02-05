@@ -1,0 +1,866 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+)
+
+// Bot represents the Telegram bot
+type Bot struct {
+	api            *tgbotapi.BotAPI
+	db             *DB
+	ai             *AIClient
+	config         *Config
+	running        bool
+	twilioManager  *TwilioCallManager
+	taskRunner     *TaskRunner
+}
+
+// NewBot creates a new Telegram bot instance
+func NewBot(config *Config, db *DB, ai *AIClient) (*Bot, error) {
+	api, err := tgbotapi.NewBotAPI(config.TelegramBotToken)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bot API: %w", err)
+	}
+
+	log.Printf("Authorized as @%s", api.Self.UserName)
+
+	return &Bot{
+		api:    api,
+		db:     db,
+		ai:     ai,
+		config: config,
+	}, nil
+}
+
+// Start begins the bot's main polling loop
+func (b *Bot) Start() {
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+
+	updates := b.api.GetUpdatesChan(u)
+	b.running = true
+
+	for update := range updates {
+		if !b.running {
+			break
+		}
+
+		// Handle callback queries (button clicks)
+		if update.CallbackQuery != nil {
+			if err := b.handleCallback(update.CallbackQuery); err != nil {
+				log.Printf("Callback error: %v", err)
+			}
+			continue
+		}
+
+		if update.Message == nil {
+			continue
+		}
+
+		if update.Message.IsCommand() {
+			if err := b.handleCommand(update); err != nil {
+				log.Printf("Command error: %v", err)
+				b.sendMessage(update.Message.Chat.ID, fmt.Sprintf("Error: %v", err))
+			}
+			continue
+		}
+
+		if err := b.handleMessage(update); err != nil {
+			log.Printf("Message error: %v", err)
+			b.sendMessage(update.Message.Chat.ID, fmt.Sprintf("Error: %v", err))
+		}
+	}
+}
+
+// Stop stops the bot
+func (b *Bot) Stop() {
+	b.running = false
+	b.api.StopReceivingUpdates()
+}
+
+// CheckReminders checks and sends pending reminders
+func (b *Bot) CheckReminders() error {
+	reminders, err := b.db.GetPendingReminders()
+	if err != nil {
+		return err
+	}
+
+	for _, r := range reminders {
+		if r.Target == "ai" {
+			// Send to AI for processing
+			if err := b.processAIReminder(r); err != nil {
+				log.Printf("Failed to process AI reminder %d: %v", r.ID, err)
+				continue
+			}
+		} else {
+			// Send directly to user
+			msg := fmt.Sprintf("🔔 *Reminder*\n\n%s", r.Message)
+			if err := b.sendMessage(r.UserID, msg); err != nil {
+				log.Printf("Failed to send reminder %d: %v", r.ID, err)
+				continue
+			}
+		}
+
+		if err := b.db.MarkReminderSent(r.ID); err != nil {
+			log.Printf("Failed to mark reminder %d as sent: %v", r.ID, err)
+		}
+	}
+
+	return nil
+}
+
+// processAIReminder sends a reminder to the AI for processing
+func (b *Bot) processAIReminder(r Reminder) error {
+	log.Printf("Processing AI reminder %d for user %d: %s", r.ID, r.UserID, r.Message)
+
+	// Get user
+	user, _, err := b.db.GetOrCreateUser(r.UserID, "", "")
+	if err != nil {
+		return err
+	}
+
+	// Get active conversation
+	conv, err := b.db.GetActiveConversation(user.ID)
+	if err != nil {
+		return err
+	}
+
+	// Load context
+	dbMessages, err := b.db.GetConversationMessages(conv.ID, b.config.MaxContextMessages)
+	if err != nil {
+		return err
+	}
+
+	var messages []ChatMessage
+	for _, m := range dbMessages {
+		cm := ChatMessage{
+			Role:    m.Role,
+			Content: m.Content,
+		}
+		messages = append(messages, cm)
+	}
+
+	// Add reminder as a system-triggered message
+	reminderPrompt := fmt.Sprintf("[SCHEDULED REMINDER - Please act on this]: %s", r.Message)
+	messages = append(messages, ChatMessage{
+		Role:    "user",
+		Content: reminderPrompt,
+	})
+
+	// Save the reminder trigger message
+	b.db.SaveMessage(conv.ID, "user", reminderPrompt, nil)
+
+	// Chat with AI
+	response, err := b.chatWithAI(messages, user.SystemPrompt, user.ID, conv.ID)
+	if err != nil {
+		return fmt.Errorf("AI error: %w", err)
+	}
+
+	// Save assistant response
+	b.db.SaveMessage(conv.ID, "assistant", response.Content, nil)
+
+	// Send AI response to user
+	modelShort := response.Model
+	if idx := strings.LastIndex(modelShort, "/"); idx != -1 {
+		modelShort = modelShort[idx+1:]
+	}
+	finalMessage := fmt.Sprintf("🤖 *AI Reminder Response*\n\n%s\n\n_%s_", response.Content, modelShort)
+
+	return b.sendMessage(r.UserID, finalMessage)
+}
+
+// handleCallback handles inline button callbacks
+func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) error {
+	data := callback.Data
+
+	// Parse callback data: "approve:USER_ID" or "reject:USER_ID"
+	parts := strings.Split(data, ":")
+	if len(parts) != 2 {
+		return nil
+	}
+
+	action := parts[0]
+	userID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return err
+	}
+
+	switch action {
+	case "approve":
+		// Approve the user
+		if err := b.db.ApproveUser(userID); err != nil {
+			return err
+		}
+
+		// Get user info
+		user, err := b.db.GetUser(userID)
+		if err != nil {
+			return err
+		}
+
+		// Update the admin message
+		editMsg := tgbotapi.NewEditMessageText(
+			callback.Message.Chat.ID,
+			callback.Message.MessageID,
+			fmt.Sprintf("✅ *Approved*\n\nID: `%d`\nUsername: @%s\nName: %s",
+				user.ID, user.Username, user.FirstName),
+		)
+		editMsg.ParseMode = "Markdown"
+		b.api.Send(editMsg)
+
+		// Notify the user
+		b.sendMessage(userID, "✅ You have been approved! You can now use Minerva. Send /start to begin.")
+
+		// Answer callback
+		b.api.Send(tgbotapi.NewCallback(callback.ID, "User approved"))
+
+	case "reject":
+		// Just remove the buttons (don't delete user, they can try again)
+		user, err := b.db.GetUser(userID)
+		if err != nil {
+			return err
+		}
+
+		// Update the admin message to show rejected
+		editMsg := tgbotapi.NewEditMessageText(
+			callback.Message.Chat.ID,
+			callback.Message.MessageID,
+			fmt.Sprintf("❌ *Rejected*\n\nID: `%d`\nUsername: @%s\nName: %s",
+				user.ID, user.Username, user.FirstName),
+		)
+		editMsg.ParseMode = "Markdown"
+		b.api.Send(editMsg)
+
+		// Answer callback
+		b.api.Send(tgbotapi.NewCallback(callback.ID, "Request rejected"))
+	}
+
+	return nil
+}
+
+// isAdmin checks if a user is the admin
+func (b *Bot) isAdmin(userID int64) bool {
+	return b.config.AdminID != 0 && userID == b.config.AdminID
+}
+
+// checkUserApproval checks if user is approved and handles pending requests
+func (b *Bot) checkUserApproval(msg *tgbotapi.Message) (*User, bool, error) {
+	user, isNew, err := b.db.GetOrCreateUser(msg.From.ID, msg.From.UserName, msg.From.FirstName)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Admin is always approved
+	if b.isAdmin(user.ID) {
+		if !user.Approved {
+			b.db.ApproveUser(user.ID)
+			user.Approved = true
+		}
+		return user, true, nil
+	}
+
+	// If no admin configured, everyone is approved
+	if b.config.AdminID == 0 {
+		return user, true, nil
+	}
+
+	// User is approved
+	if user.Approved {
+		return user, true, nil
+	}
+
+	// New user - send approval request to admin
+	if isNew {
+		b.sendApprovalRequest(user)
+		b.sendMessage(msg.Chat.ID, "⏳ Your access request has been sent to the administrator. Please wait for approval.")
+	} else {
+		// Existing unapproved user - remind them
+		b.sendMessage(msg.Chat.ID, "⏳ Your access request is pending administrator approval.")
+	}
+
+	return user, false, nil
+}
+
+// sendApprovalRequest sends an approval request to the admin
+func (b *Bot) sendApprovalRequest(user *User) {
+	if b.config.AdminID == 0 {
+		return
+	}
+
+	text := fmt.Sprintf("🆕 *New User Request*\n\nID: `%d`\nUsername: @%s\nName: %s",
+		user.ID, user.Username, user.FirstName)
+
+	msg := tgbotapi.NewMessage(b.config.AdminID, text)
+	msg.ParseMode = "Markdown"
+
+	// Add inline keyboard with approve/reject buttons
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Approve", fmt.Sprintf("approve:%d", user.ID)),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Reject", fmt.Sprintf("reject:%d", user.ID)),
+		),
+	)
+	msg.ReplyMarkup = keyboard
+
+	if _, err := b.api.Send(msg); err != nil {
+		log.Printf("Failed to send approval request to admin: %v", err)
+	}
+}
+
+func (b *Bot) handleCommand(update tgbotapi.Update) error {
+	msg := update.Message
+	command := msg.Command()
+	args := msg.CommandArguments()
+
+	log.Printf("Command /%s from %d", command, msg.From.ID)
+
+	// Check approval for all commands except start
+	user, approved, err := b.checkUserApproval(msg)
+	if err != nil {
+		return err
+	}
+
+	// Allow /start for everyone (to show pending message)
+	if command == "start" {
+		if !approved {
+			return nil // Message already sent by checkUserApproval
+		}
+		return b.handleStart(msg)
+	}
+
+	// All other commands require approval
+	if !approved {
+		return nil
+	}
+
+	switch command {
+	case "new":
+		return b.handleNew(msg, user)
+	case "history":
+		return b.handleHistory(msg, user)
+	case "system":
+		return b.handleSystem(msg, args, user)
+	case "memory":
+		return b.handleMemory(msg, user)
+	case "reminders":
+		return b.handleReminders(msg, user)
+	case "tasks":
+		return b.handleTasks(msg, user)
+	case "cancel":
+		return b.handleCancelTask(msg, args)
+	case "resume":
+		return b.handleResumeTask(msg, args)
+	case "status":
+		return b.handleTaskStatus(msg, args)
+	default:
+		return b.sendMessage(msg.Chat.ID, "Unknown command. Use /start for help.")
+	}
+}
+
+func (b *Bot) handleStart(msg *tgbotapi.Message) error {
+	welcome := `*Minerva - Personal AI Assistant*
+
+I can help you with:
+• Having conversations (just send me a message)
+• Setting reminders
+• Remembering things about you
+• Running background tasks (web research, calls, etc.)
+
+*Commands:*
+/new - Start a new conversation
+/history - View past conversations
+/system <prompt> - Set custom AI behavior
+/memory - View what I remember about you
+/reminders - View pending reminders
+/tasks - View running tasks
+/status <id> - Check task status & progress
+/cancel <id> - Cancel a task
+/resume <id> - Resume a failed task
+
+Just send me a message to chat!`
+
+	return b.sendMessage(msg.Chat.ID, welcome)
+}
+
+func (b *Bot) handleNew(msg *tgbotapi.Message, user *User) error {
+	_, err := b.db.CreateConversation(user.ID, "")
+	if err != nil {
+		return err
+	}
+
+	return b.sendMessage(msg.Chat.ID, "New conversation started!")
+}
+
+func (b *Bot) handleHistory(msg *tgbotapi.Message, user *User) error {
+	conversations, err := b.db.GetUserConversations(user.ID, 10)
+	if err != nil {
+		return err
+	}
+
+	if len(conversations) == 0 {
+		return b.sendMessage(msg.Chat.ID, "No conversations yet. Send a message to start!")
+	}
+
+	var sb strings.Builder
+	sb.WriteString("*Recent conversations:*\n\n")
+
+	for i, conv := range conversations {
+		status := ""
+		if conv.Active {
+			status = " ✓"
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s%s\n   _%s_\n\n",
+			i+1, conv.Title, status, conv.CreatedAt.Format("Jan 2, 15:04")))
+	}
+
+	return b.sendMessage(msg.Chat.ID, sb.String())
+}
+
+func (b *Bot) handleSystem(msg *tgbotapi.Message, args string, user *User) error {
+	if args == "" {
+		if user.SystemPrompt == "" {
+			return b.sendMessage(msg.Chat.ID, "No custom system prompt set.\n\nUse `/system <prompt>` to set one.")
+		}
+		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("*Current system prompt:*\n\n%s\n\nUse `/system clear` to remove it.", user.SystemPrompt))
+	}
+
+	if strings.ToLower(args) == "clear" {
+		if err := b.db.UpdateUserSystemPrompt(user.ID, ""); err != nil {
+			return err
+		}
+		return b.sendMessage(msg.Chat.ID, "System prompt cleared.")
+	}
+
+	if err := b.db.UpdateUserSystemPrompt(user.ID, args); err != nil {
+		return err
+	}
+
+	return b.sendMessage(msg.Chat.ID, "System prompt updated!")
+}
+
+func (b *Bot) handleMemory(msg *tgbotapi.Message, user *User) error {
+	memory, err := b.db.GetUserMemory(user.ID)
+	if err != nil {
+		return err
+	}
+
+	if memory == "" {
+		return b.sendMessage(msg.Chat.ID, "No memory stored yet. Just chat with me and I'll remember important things!")
+	}
+
+	charCount := len(memory)
+	response := fmt.Sprintf("*What I remember about you:*\n\n%s\n\n_(%d/2000 characters)_", memory, charCount)
+
+	return b.sendMessage(msg.Chat.ID, response)
+}
+
+func (b *Bot) handleReminders(msg *tgbotapi.Message, user *User) error {
+	reminders, err := b.db.GetUserReminders(user.ID)
+	if err != nil {
+		return err
+	}
+
+	if len(reminders) == 0 {
+		return b.sendMessage(msg.Chat.ID, "No pending reminders. Ask me to set one!")
+	}
+
+	var sb strings.Builder
+	sb.WriteString("*Pending reminders:*\n\n")
+
+	for i, r := range reminders {
+		timeStr := r.RemindAt.Format("Jan 2, 15:04")
+		until := time.Until(r.RemindAt)
+		untilStr := formatDuration(until)
+
+		sb.WriteString(fmt.Sprintf("%d. %s\n   🕐 %s (%s)\n\n",
+			i+1, r.Message, timeStr, untilStr))
+	}
+
+	return b.sendMessage(msg.Chat.ID, sb.String())
+}
+
+func (b *Bot) handleTasks(msg *tgbotapi.Message, user *User) error {
+	tasks, err := b.db.GetUserTasks(user.ID)
+	if err != nil {
+		return err
+	}
+
+	if len(tasks) == 0 {
+		return b.sendMessage(msg.Chat.ID, "No tasks. Ask me to do something complex and I'll create a background task!")
+	}
+
+	var sb strings.Builder
+	sb.WriteString("*Tasks:*\n\n")
+
+	for _, t := range tasks {
+		statusEmoji := "🔄"
+		switch t.Status {
+		case "completed":
+			statusEmoji = "✅"
+		case "failed":
+			statusEmoji = "❌"
+		case "cancelled":
+			statusEmoji = "🚫"
+		}
+
+		desc := t.Description
+		if len(desc) > 50 {
+			desc = desc[:50] + "..."
+		}
+
+		sb.WriteString(fmt.Sprintf("%s `%s`\n   %s\n   _%s_\n\n",
+			statusEmoji, t.ID, desc, t.CreatedAt.Format("Jan 2, 15:04")))
+	}
+
+	sb.WriteString("Use /cancel <id> to cancel a running task")
+
+	return b.sendMessage(msg.Chat.ID, sb.String())
+}
+
+func (b *Bot) handleCancelTask(msg *tgbotapi.Message, args string) error {
+	if args == "" {
+		return b.sendMessage(msg.Chat.ID, "Usage: /cancel <task_id>")
+	}
+
+	if b.taskRunner == nil {
+		return b.sendMessage(msg.Chat.ID, "Task runner not configured")
+	}
+
+	if err := b.taskRunner.CancelTask(args); err != nil {
+		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Failed to cancel task: %v", err))
+	}
+
+	return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Task %s cancelled", args))
+}
+
+func (b *Bot) handleResumeTask(msg *tgbotapi.Message, args string) error {
+	if args == "" {
+		return b.sendMessage(msg.Chat.ID, "Usage: /resume <task_id>")
+	}
+
+	if b.taskRunner == nil {
+		return b.sendMessage(msg.Chat.ID, "Task runner not configured")
+	}
+
+	if err := b.taskRunner.ResumeTask(args, msg.From.ID); err != nil {
+		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Failed to resume task: %v", err))
+	}
+
+	return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Task %s resumed. Claude Code is working on it again.", args))
+}
+
+func (b *Bot) handleTaskStatus(msg *tgbotapi.Message, args string) error {
+	if args == "" {
+		return b.sendMessage(msg.Chat.ID, "Usage: /status <task_id>")
+	}
+
+	if b.taskRunner == nil {
+		return b.sendMessage(msg.Chat.ID, "Task runner not configured")
+	}
+
+	task, err := b.db.GetTask(args)
+	if err != nil {
+		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Task not found: %v", err))
+	}
+
+	// Check if process is actually running
+	isRunning, _ := b.taskRunner.IsTaskRunning(args)
+
+	// Get progress
+	progress, _ := b.taskRunner.GetTaskProgress(args)
+
+	statusEmoji := map[string]string{
+		"running":   "🔄",
+		"completed": "✅",
+		"failed":    "❌",
+		"cancelled": "⛔",
+	}
+
+	emoji := statusEmoji[task.Status]
+	if emoji == "" {
+		emoji = "❓"
+	}
+
+	// Build status message
+	statusMsg := fmt.Sprintf("*Task Status*\n\nID: `%s`\nStatus: %s %s\n", task.ID, emoji, task.Status)
+
+	if task.Status == "running" {
+		if isRunning {
+			statusMsg += fmt.Sprintf("Process: Running (PID %d)\n", task.PID)
+		} else {
+			statusMsg += "Process: Not running (may have crashed)\n"
+		}
+	}
+
+	statusMsg += fmt.Sprintf("Created: %s\n", task.CreatedAt.Format("2006-01-02 15:04"))
+
+	if task.CompletedAt != nil {
+		statusMsg += fmt.Sprintf("Completed: %s\n", task.CompletedAt.Format("2006-01-02 15:04"))
+	}
+
+	// Add progress if available
+	if progress != "" && progress != "No progress file found" {
+		if len(progress) > 1500 {
+			progress = progress[len(progress)-1500:]
+			progress = "...\n" + progress
+		}
+		statusMsg += fmt.Sprintf("\n*Progress:*\n```\n%s\n```", progress)
+	}
+
+	return b.sendMessage(msg.Chat.ID, statusMsg)
+}
+
+func (b *Bot) handleMessage(update tgbotapi.Update) error {
+	msg := update.Message
+	userMessage := msg.Text
+	caption := msg.Caption
+
+	// Use caption if no text (for photos/documents)
+	if userMessage == "" && caption != "" {
+		userMessage = caption
+	}
+	if userMessage == "" {
+		userMessage = "[Image]"
+	}
+
+	log.Printf("Message from %d: %s", msg.From.ID, truncate(userMessage, 50))
+
+	// Check approval
+	user, approved, err := b.checkUserApproval(msg)
+	if err != nil {
+		return err
+	}
+	if !approved {
+		return nil
+	}
+
+	b.sendTypingAction(msg.Chat.ID)
+
+	// Get or create conversation
+	conv, err := b.db.GetActiveConversation(user.ID)
+	if err != nil {
+		return err
+	}
+
+	// Load context
+	dbMessages, err := b.db.GetConversationMessages(conv.ID, b.config.MaxContextMessages)
+	if err != nil {
+		return err
+	}
+
+	// Convert to ChatMessage format
+	var messages []ChatMessage
+	for _, m := range dbMessages {
+		cm := ChatMessage{
+			Role:    m.Role,
+			Content: m.Content,
+		}
+		if m.ToolCalls != nil {
+			json.Unmarshal([]byte(*m.ToolCalls), &cm.ToolCalls)
+		}
+		messages = append(messages, cm)
+	}
+
+	// Build user message content (text or multimodal with image)
+	var userContent any = userMessage
+
+	// Check if message has a photo
+	if len(msg.Photo) > 0 {
+		// Get the largest photo
+		photo := msg.Photo[len(msg.Photo)-1]
+		imageBase64, err := b.downloadFileAsBase64(photo.FileID)
+		if err != nil {
+			log.Printf("Failed to download image: %v", err)
+		} else {
+			// Create multimodal content
+			userContent = []ContentPart{
+				{Type: "text", Text: userMessage},
+				{Type: "image_url", ImageURL: &ImageURL{URL: "data:image/jpeg;base64," + imageBase64}},
+			}
+		}
+	}
+
+	// Check if message has a document (image file)
+	if msg.Document != nil && strings.HasPrefix(msg.Document.MimeType, "image/") {
+		imageBase64, err := b.downloadFileAsBase64(msg.Document.FileID)
+		if err != nil {
+			log.Printf("Failed to download document image: %v", err)
+		} else {
+			userContent = []ContentPart{
+				{Type: "text", Text: userMessage},
+				{Type: "image_url", ImageURL: &ImageURL{URL: "data:image/jpeg;base64," + imageBase64}},
+			}
+		}
+	}
+
+	// Add user message
+	messages = append(messages, ChatMessage{
+		Role:    "user",
+		Content: userContent,
+	})
+
+	// Save user message (text only for DB)
+	if err := b.db.SaveMessage(conv.ID, "user", userMessage, nil); err != nil {
+		return err
+	}
+
+	// Chat with AI
+	response, err := b.chatWithAI(messages, user.SystemPrompt, user.ID, conv.ID)
+	if err != nil {
+		return fmt.Errorf("AI error: %w", err)
+	}
+
+	// Save assistant response
+	if err := b.db.SaveMessage(conv.ID, "assistant", response.Content, nil); err != nil {
+		log.Printf("Failed to save assistant message: %v", err)
+	}
+
+	// Add model info at the end (small, in italics)
+	modelShort := response.Model
+	if idx := strings.LastIndex(modelShort, "/"); idx != -1 {
+		modelShort = modelShort[idx+1:]
+	}
+	finalMessage := fmt.Sprintf("%s\n\n_%s_", response.Content, modelShort)
+
+	return b.sendMessage(msg.Chat.ID, finalMessage)
+}
+
+// downloadFileAsBase64 downloads a file from Telegram and returns it as base64
+func (b *Bot) downloadFileAsBase64(fileID string) (string, error) {
+	file, err := b.api.GetFile(tgbotapi.FileConfig{FileID: fileID})
+	if err != nil {
+		return "", fmt.Errorf("failed to get file: %w", err)
+	}
+
+	fileURL := file.Link(b.config.TelegramBotToken)
+
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to download file: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// AIResponse contains the AI response and model used
+type AIResponse struct {
+	Content string
+	Model   string
+}
+
+func (b *Bot) chatWithAI(messages []ChatMessage, systemPrompt string, userID, convID int64) (*AIResponse, error) {
+	tools := GetToolDefinitions()
+	currentMessages := messages
+	var usedModel string
+
+	// Inject user memory into system prompt
+	memory, err := b.db.GetUserMemory(userID)
+	if err != nil {
+		log.Printf("Failed to get user memory: %v", err)
+	}
+	if memory != "" {
+		systemPrompt = systemPrompt + "\n\n[USER MEMORY - Important information about this user]\n" + memory
+	}
+
+	for range 10 {
+		b.sendTypingAction(userID) // Keep typing indicator
+
+		result, err := b.ai.Chat(currentMessages, systemPrompt, tools)
+		if err != nil {
+			return nil, err
+		}
+
+		usedModel = result.Model
+		response := result.Message
+
+		// No tool calls = final response
+		if len(response.ToolCalls) == 0 {
+			content, _ := response.Content.(string)
+			return &AIResponse{Content: content, Model: usedModel}, nil
+		}
+
+		log.Printf("Executing %d tool calls", len(response.ToolCalls))
+
+		// Add assistant message with tool calls
+		currentMessages = append(currentMessages, *response)
+
+		// Execute tools
+		executor := NewToolExecutor(b.db.DB, userID)
+		for _, tc := range response.ToolCalls {
+			result, err := executor.Execute(tc.Function.Name, tc.Function.Arguments, b)
+			if err != nil {
+				log.Printf("Tool error (%s): %v", tc.Function.Name, err)
+				result = fmt.Sprintf(`{"error": "%s"}`, err.Error())
+			}
+
+			currentMessages = append(currentMessages, ChatMessage{
+				Role:       "tool",
+				Content:    result,
+				ToolCallID: tc.ID,
+			})
+		}
+	}
+
+	return nil, fmt.Errorf("max iterations reached")
+}
+
+func (b *Bot) sendMessage(chatID int64, text string) error {
+	msg := tgbotapi.NewMessage(chatID, text)
+	// Try Markdown first, fall back to plain text if it fails
+	msg.ParseMode = "Markdown"
+	_, err := b.api.Send(msg)
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		// Retry without Markdown
+		msg.ParseMode = ""
+		_, err = b.api.Send(msg)
+	}
+	return err
+}
+
+func (b *Bot) sendDocument(chatID int64, filename string, data []byte) error {
+	fileBytes := tgbotapi.FileBytes{Name: filename, Bytes: data}
+	doc := tgbotapi.NewDocument(chatID, fileBytes)
+	_, err := b.api.Send(doc)
+	return err
+}
+
+func (b *Bot) sendTypingAction(chatID int64) {
+	action := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
+	b.api.Send(action)
+}
+
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		return "overdue"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("in %d min", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("in %d hours", int(d.Hours()))
+	}
+	return fmt.Sprintf("in %d days", int(d.Hours()/24))
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}

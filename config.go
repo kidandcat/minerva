@@ -1,0 +1,89 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/joho/godotenv"
+)
+
+// Config holds all configuration for the Minerva bot
+type Config struct {
+	TelegramBotToken   string
+	OpenRouterAPIKey   string
+	DatabasePath       string
+	Models             []string // Priority hierarchy of models
+	MaxContextMessages int
+	AdminID            int64  // Telegram user ID of the admin
+	ResendAPIKey         string // Resend API key for email
+	ResendWebhookSecret  string // Resend webhook signing secret
+	WebhookPort          int    // Port for incoming webhooks
+	TwilioAccountSID     string // Twilio Account SID
+	TwilioAuthToken      string // Twilio Auth Token
+	TwilioPhoneNumber    string // Twilio phone number for outbound calls
+}
+
+// LoadConfig loads configuration from environment variables
+func LoadConfig() (*Config, error) {
+	// Load .env file (overrides existing env vars)
+	_ = godotenv.Overload()
+
+	// Parse models from comma-separated list
+	modelsStr := os.Getenv("MODELS")
+	var models []string
+	if modelsStr != "" {
+		for _, m := range strings.Split(modelsStr, ",") {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				models = append(models, m)
+			}
+		}
+	}
+
+	config := &Config{
+		TelegramBotToken:   os.Getenv("TELEGRAM_BOT_TOKEN"),
+		OpenRouterAPIKey:   os.Getenv("OPENROUTER_API_KEY"),
+		DatabasePath:       getEnvOrDefault("DATABASE_PATH", "./minerva.db"),
+		Models:             models, // Empty means use DefaultModels
+		MaxContextMessages: getEnvAsIntOrDefault("MAX_CONTEXT_MESSAGES", 20),
+		AdminID:            int64(getEnvAsIntOrDefault("ADMIN_ID", 0)),
+		ResendAPIKey:         os.Getenv("RESEND_API_KEY"),
+		ResendWebhookSecret:  os.Getenv("RESEND_WEBHOOK_SECRET"),
+		WebhookPort:          getEnvAsIntOrDefault("WEBHOOK_PORT", 8080),
+		TwilioAccountSID:     os.Getenv("TWILIO_ACCOUNT_SID"),
+		TwilioAuthToken:      os.Getenv("TWILIO_AUTH_TOKEN"),
+		TwilioPhoneNumber:    os.Getenv("TWILIO_PHONE_NUMBER"),
+	}
+
+	if config.TelegramBotToken == "" {
+		return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
+	}
+	if config.OpenRouterAPIKey == "" {
+		return nil, fmt.Errorf("OPENROUTER_API_KEY is required")
+	}
+
+	return config, nil
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnvAsIntOrDefault(key string, defaultValue int) int {
+	valueStr := os.Getenv(key)
+	if valueStr == "" {
+		return defaultValue
+	}
+
+	value, err := strconv.Atoi(valueStr)
+	if err != nil {
+		return defaultValue
+	}
+
+	return value
+}
