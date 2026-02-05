@@ -272,9 +272,10 @@ func (b *Bot) checkUserApproval(msg *tgbotapi.Message) (*User, bool, error) {
 		return user, true, nil
 	}
 
-	// If no admin configured, everyone is approved
+	// If no admin configured, reject everyone (security: misconfigured deploy must not be open)
 	if b.config.AdminID == 0 {
-		return user, true, nil
+		b.sendMessage(msg.Chat.ID, "Bot not configured. ADMIN_ID is required.")
+		return user, false, nil
 	}
 
 	// User is approved
