@@ -458,13 +458,7 @@ func (w *WebhookServer) processEmailWithAI(payload ResendWebhookPayload, toAddrs
 	w.bot.db.SaveMessage(conv.ID, "assistant", response.Content, nil)
 
 	// Send AI response to admin
-	modelShort := response.Model
-	if idx := strings.LastIndex(modelShort, "/"); idx != -1 {
-		modelShort = modelShort[idx+1:]
-	}
-	finalMessage := fmt.Sprintf("%s\n\n_%s_", response.Content, modelShort)
-
-	if err := w.bot.sendMessage(adminID, finalMessage); err != nil {
+	if err := w.bot.sendMessage(adminID, response.Content); err != nil {
 		log.Printf("Failed to send AI email response: %v", err)
 	}
 }

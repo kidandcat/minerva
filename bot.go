@@ -177,11 +177,7 @@ func (b *Bot) processAIReminder(r Reminder) error {
 	b.db.SaveMessage(conv.ID, "assistant", response.Content, nil)
 
 	// Send AI response to user
-	modelShort := response.Model
-	if idx := strings.LastIndex(modelShort, "/"); idx != -1 {
-		modelShort = modelShort[idx+1:]
-	}
-	finalMessage := fmt.Sprintf("🤖 *AI Reminder Response*\n\n%s\n\n_%s_", response.Content, modelShort)
+	finalMessage := fmt.Sprintf("🤖 *AI Reminder Response*\n\n%s", response.Content)
 
 	return b.sendMessage(r.UserID, finalMessage)
 }
@@ -732,14 +728,7 @@ func (b *Bot) handleMessage(update tgbotapi.Update) error {
 		log.Printf("Failed to save assistant message: %v", err)
 	}
 
-	// Add model info at the end (small, in italics)
-	modelShort := response.Model
-	if idx := strings.LastIndex(modelShort, "/"); idx != -1 {
-		modelShort = modelShort[idx+1:]
-	}
-	finalMessage := fmt.Sprintf("%s\n\n_%s_", response.Content, modelShort)
-
-	return b.sendMessage(msg.Chat.ID, finalMessage)
+	return b.sendMessage(msg.Chat.ID, response.Content)
 }
 
 // downloadFileAsBase64 downloads a file from Telegram and returns it as base64
