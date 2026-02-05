@@ -1,0 +1,13 @@
+services:
+  minerva:
+    build: .
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./workspace:/app/workspace
+    environment:
+      - DATABASE_PATH=/app/data/minerva.db
+      - MINERVA_WORKSPACE=/app/workspace
+    restart: unless-stopped

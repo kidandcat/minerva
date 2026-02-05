@@ -1,8 +1,23 @@
-# Binary
+# Binaries
 minerva
+minerva-linux
+minerva-agent
+minerva-agent-linux
+minerva-mcp-linux
+agent/minerva-agent
+agent/minerva-agent-linux
+agent/minerva-linux
+mcp/minerva-linux
+mcp/minerva-mcp-linux
 
 # Environment
+.env
 .env.local
+
+# Database
+*.db
+*.db-wal
+*.db-shm
 
 # IDE
 .idea/
@@ -12,3 +27,4 @@ minerva
 
 # OS
 .DS_Store
+Thumbs.db
