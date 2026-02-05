@@ -98,8 +98,6 @@ func NewAIClient(apiKey string, models []string) *AIClient {
 	if len(models) == 0 {
 		models = DefaultModels
 	}
-	// Hardcoded API key
-	apiKey = "REDACTED_API_KEY"
 	return &AIClient{
 		apiKey: apiKey,
 		httpClient: &http.Client{

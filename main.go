@@ -97,8 +97,13 @@ func main() {
 	bot.taskRunner = NewTaskRunner(bot)
 	log.Println("Task runner initialized")
 
-	// Initialize agent hub
-	bot.agentHub = NewAgentHub(config.AgentPassword)
+	// Initialize agent hub with notification callback
+	agentNotify := func(message string) {
+		if config.AdminID != 0 {
+			bot.sendMessage(config.AdminID, message)
+		}
+	}
+	bot.agentHub = NewAgentHub(config.AgentPassword, agentNotify)
 	if config.AgentPassword != "" {
 		log.Println("Agent hub initialized (password protected)")
 	} else {

@@ -43,7 +43,7 @@ func (t *ToolExecutor) Execute(name string, arguments string, bot *Bot) (string,
 		return executeCreateTask(bot, t.userID, arguments)
 	case "get_task_progress":
 		return executeGetTaskProgress(bot, arguments)
-	case "list_agents", "run_claude_task":
+	case "run_claude", "list_claude_projects":
 		if bot.agentHub == nil {
 			return "", fmt.Errorf("agent hub not configured")
 		}
@@ -327,8 +327,8 @@ func GetToolDefinitions() []Tool {
 		{
 			Type: "function",
 			Function: ToolFunction{
-				Name:        "list_agents",
-				Description: "List all connected Claude Code agents. Agents are remote machines running minerva-agent that can execute Claude Code tasks.",
+				Name:        "list_claude_projects",
+				Description: "List all projects (home directories) available on connected Claude Code agents. Use this to see what projects each agent can work on. Returns a map of agent name to list of project folders.",
 				Parameters: map[string]any{
 					"type":       "object",
 					"properties": map[string]any{},
@@ -338,7 +338,7 @@ func GetToolDefinitions() []Tool {
 		{
 			Type: "function",
 			Function: ToolFunction{
-				Name:        "run_claude_task",
+				Name:        "run_claude",
 				Description: "Run a task on a remote Claude Code agent. The agent will execute the prompt using Claude Code with full permissions and return the result. Use list_agents first to see available agents.",
 				Parameters: map[string]any{
 					"type": "object",

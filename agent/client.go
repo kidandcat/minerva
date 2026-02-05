@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -11,13 +13,15 @@ import (
 
 // Message types
 const (
-	MsgTypeRegister = "register"
-	MsgTypeTask     = "task"
-	MsgTypeResult   = "result"
-	MsgTypeStatus   = "status"
-	MsgTypePing     = "ping"
-	MsgTypePong     = "pong"
-	MsgTypeError    = "error"
+	MsgTypeRegister     = "register"
+	MsgTypeTask         = "task"
+	MsgTypeResult       = "result"
+	MsgTypeStatus       = "status"
+	MsgTypePing         = "ping"
+	MsgTypePong         = "pong"
+	MsgTypeError        = "error"
+	MsgTypeListProjects = "list_projects"
+	MsgTypeProjects     = "projects"
 )
 
 // Message represents a WebSocket message
@@ -25,9 +29,10 @@ type Message struct {
 	Type string `json:"type"`
 
 	// Register
-	Name     string `json:"name,omitempty"`
-	Cwd      string `json:"cwd,omitempty"`
-	Password string `json:"password,omitempty"`
+	Name     string   `json:"name,omitempty"`
+	Cwd      string   `json:"cwd,omitempty"`
+	Password string   `json:"password,omitempty"`
+	Projects []string `json:"projects,omitempty"`
 
 	// Task
 	ID     string `json:"id,omitempty"`
@@ -113,6 +118,7 @@ func (c *Client) connect() error {
 		Name:     c.agentName,
 		Cwd:      c.workingDir,
 		Password: c.password,
+		Projects: listHomeProjects(),
 	})
 }
 
@@ -155,6 +161,12 @@ func (c *Client) handleMessages() {
 		switch msg.Type {
 		case MsgTypeTask:
 			go c.handleTask(msg)
+		case MsgTypeListProjects:
+			c.send(Message{
+				Type:     MsgTypeProjects,
+				ID:       msg.ID,
+				Projects: listHomeProjects(),
+			})
 		case MsgTypePing:
 			c.send(Message{Type: MsgTypePong})
 		}
@@ -218,4 +230,29 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// listHomeProjects returns all directories in the user's home folder
+func listHomeProjects() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		return nil
+	}
+
+	var projects []string
+	for _, entry := range entries {
+		// Skip hidden directories and files
+		if entry.Name()[0] == '.' {
+			continue
+		}
+		if entry.IsDir() {
+			projects = append(projects, filepath.Join(home, entry.Name()))
+		}
+	}
+	return projects
 }

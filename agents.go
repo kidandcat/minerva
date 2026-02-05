@@ -13,11 +13,13 @@ import (
 
 // Agent message types
 const (
-	AgentMsgRegister = "register"
-	AgentMsgTask     = "task"
-	AgentMsgResult   = "result"
-	AgentMsgPing     = "ping"
-	AgentMsgPong     = "pong"
+	AgentMsgRegister     = "register"
+	AgentMsgTask         = "task"
+	AgentMsgResult       = "result"
+	AgentMsgPing         = "ping"
+	AgentMsgPong         = "pong"
+	AgentMsgListProjects = "list_projects"
+	AgentMsgProjects     = "projects"
 )
 
 // AgentMessage represents a message to/from an agent
@@ -25,9 +27,10 @@ type AgentMessage struct {
 	Type string `json:"type"`
 
 	// Register
-	Name     string `json:"name,omitempty"`
-	Cwd      string `json:"cwd,omitempty"`
-	Password string `json:"password,omitempty"`
+	Name     string   `json:"name,omitempty"`
+	Cwd      string   `json:"cwd,omitempty"`
+	Password string   `json:"password,omitempty"`
+	Projects []string `json:"projects,omitempty"` // Folders in home directory
 
 	// Task
 	ID     string `json:"id,omitempty"`
@@ -45,6 +48,7 @@ type AgentMessage struct {
 type Agent struct {
 	Name      string
 	Cwd       string
+	Projects  []string
 	conn      *websocket.Conn
 	hub       *AgentHub
 	send      chan AgentMessage
@@ -59,21 +63,26 @@ type PendingTask struct {
 	Created  time.Time
 }
 
+// NotifyFunc is a callback for agent events
+type NotifyFunc func(message string)
+
 // AgentHub manages agent connections
 type AgentHub struct {
 	agents   map[string]*Agent
 	tasks    map[string]*PendingTask
 	password string
+	notify   NotifyFunc
 	mu       sync.RWMutex
 	upgrader websocket.Upgrader
 }
 
 // NewAgentHub creates a new agent hub
-func NewAgentHub(password string) *AgentHub {
+func NewAgentHub(password string, notify NotifyFunc) *AgentHub {
 	return &AgentHub{
 		agents:   make(map[string]*Agent),
 		tasks:    make(map[string]*PendingTask),
 		password: password,
+		notify:   notify,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -100,19 +109,64 @@ func (h *AgentHub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListAgents returns a list of connected agents
-func (h *AgentHub) ListAgents() []map[string]interface{} {
+func (h *AgentHub) ListAgents() []map[string]any {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	list := make([]map[string]interface{}, 0, len(h.agents))
+	list := make([]map[string]any, 0, len(h.agents))
 	for name, agent := range h.agents {
-		list = append(list, map[string]interface{}{
+		list = append(list, map[string]any{
 			"name":      name,
 			"cwd":       agent.Cwd,
+			"projects":  agent.Projects,
 			"connected": agent.connected.Format(time.RFC3339),
 		})
 	}
 	return list
+}
+
+// GetProjects requests the current project list from an agent
+func (h *AgentHub) GetProjects(agentName string, timeout time.Duration) ([]string, error) {
+	h.mu.RLock()
+	agent, ok := h.agents[agentName]
+	h.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("agent '%s' not found", agentName)
+	}
+
+	// Create request
+	reqID := fmt.Sprintf("proj_%d", time.Now().UnixNano())
+	resultChan := make(chan AgentMessage, 1)
+
+	h.mu.Lock()
+	h.tasks[reqID] = &PendingTask{
+		ID:      reqID,
+		Agent:   agentName,
+		Result:  resultChan,
+		Created: time.Now(),
+	}
+	h.mu.Unlock()
+
+	defer func() {
+		h.mu.Lock()
+		delete(h.tasks, reqID)
+		h.mu.Unlock()
+	}()
+
+	// Request projects
+	agent.send <- AgentMessage{
+		Type: AgentMsgListProjects,
+		ID:   reqID,
+	}
+
+	// Wait for result
+	select {
+	case result := <-resultChan:
+		return result.Projects, nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout waiting for projects from '%s'", agentName)
+	}
 }
 
 // SendTask sends a task to an agent and waits for the result
@@ -178,6 +232,10 @@ func (h *AgentHub) registerAgent(agent *Agent, password string) bool {
 
 	h.agents[agent.Name] = agent
 	log.Printf("Agent '%s' connected from %s", agent.Name, agent.Cwd)
+
+	if h.notify != nil {
+		h.notify(fmt.Sprintf("🟢 Agent '%s' connected", agent.Name))
+	}
 	return true
 }
 
@@ -188,6 +246,10 @@ func (h *AgentHub) unregisterAgent(agent *Agent) {
 	if existing, ok := h.agents[agent.Name]; ok && existing == agent {
 		delete(h.agents, agent.Name)
 		log.Printf("Agent '%s' disconnected", agent.Name)
+
+		if h.notify != nil {
+			h.notify(fmt.Sprintf("🔴 Agent '%s' disconnected", agent.Name))
+		}
 	}
 }
 
@@ -232,13 +294,18 @@ func (a *Agent) readPump() {
 		case AgentMsgRegister:
 			a.Name = msg.Name
 			a.Cwd = msg.Cwd
+			a.Projects = msg.Projects
 			if !a.hub.registerAgent(a, msg.Password) {
 				// Auth failed, close connection
 				return
 			}
 
-		case AgentMsgResult:
+		case AgentMsgResult, AgentMsgProjects:
 			a.hub.handleResult(msg)
+
+		case AgentMsgPing:
+			// Respond with pong
+			a.send <- AgentMessage{Type: AgentMsgPong}
 
 		case AgentMsgPong:
 			// Keep alive
@@ -293,7 +360,7 @@ func GetAgentToolDefinitions() []Tool {
 		{
 			Type: "function",
 			Function: ToolFunction{
-				Name:        "run_claude_task",
+				Name:        "run_claude",
 				Description: "Run a task on a remote Claude Code agent. The agent will execute the prompt using Claude Code and return the result.",
 				Parameters: map[string]interface{}{
 					"type": "object",
@@ -321,15 +388,26 @@ func GetAgentToolDefinitions() []Tool {
 // ExecuteAgentTool executes an agent-related tool
 func ExecuteAgentTool(hub *AgentHub, name, arguments string) (string, error) {
 	switch name {
-	case "list_agents":
+	case "list_claude_projects":
 		agents := hub.ListAgents()
 		if len(agents) == 0 {
 			return "No agents connected", nil
 		}
-		data, _ := json.MarshalIndent(agents, "", "  ")
+
+		result := make(map[string][]string)
+		for _, agent := range agents {
+			agentName := agent["name"].(string)
+			projects, err := hub.GetProjects(agentName, 10*time.Second)
+			if err != nil {
+				result[agentName] = []string{fmt.Sprintf("error: %v", err)}
+			} else {
+				result[agentName] = projects
+			}
+		}
+		data, _ := json.MarshalIndent(result, "", "  ")
 		return string(data), nil
 
-	case "run_claude_task":
+	case "run_claude":
 		var args struct {
 			Agent  string `json:"agent"`
 			Prompt string `json:"prompt"`
