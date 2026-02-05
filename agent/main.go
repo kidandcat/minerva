@@ -51,8 +51,9 @@ func main() {
 	}
 	workingDir = absDir
 
+	// Password is optional - server may not require it
 	if Password == "" {
-		log.Fatalf("Binary not configured: password not set. Build with: go build -ldflags \"-X main.Password=SECRET\"")
+		log.Printf("WARNING: No password set. Build with: go build -ldflags \"-X main.Password=SECRET\"")
 	}
 
 	log.Printf("Starting minerva-agent")
