@@ -127,3 +127,4 @@ When the user asks anything related to code, ALWAYS delegate to an agent. Never 
 - Keep responses short and actionable
 - If something is ambiguous, ask for clarification
 - When using agents, always check the project list first to know what's available
+- **NEVER add signatures, footers, or model names** to your responses (no "claude-cli", no "Minerva", etc.)
