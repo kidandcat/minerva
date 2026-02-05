@@ -118,38 +118,15 @@ func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Too
 	}, nil
 }
 
-// buildPrompt constructs the prompt from messages and system prompt
+// buildPrompt constructs the prompt from messages
+// With --continue, Claude maintains its own context, so we only send the last message
 func (c *AIClient) buildPrompt(messages []ChatMessage, systemPrompt string) string {
-	var parts []string
-
-	// Add context header if there's history
-	if len(messages) > 1 {
-		parts = append(parts, "## Conversation History")
-		for _, msg := range messages[:len(messages)-1] {
-			content := extractContent(msg.Content)
-			if content == "" {
-				continue
-			}
-			switch msg.Role {
-			case "user":
-				parts = append(parts, fmt.Sprintf("User: %s", content))
-			case "assistant":
-				parts = append(parts, fmt.Sprintf("Assistant: %s", content))
-			case "system":
-				// Skip system messages in history, they're handled separately
-			}
-		}
-		parts = append(parts, "\n## Current Request")
-	}
-
-	// Add the last user message as the main prompt
+	// Only send the last user message - Claude's --continue handles conversation context
 	if len(messages) > 0 {
 		lastMsg := messages[len(messages)-1]
-		content := extractContent(lastMsg.Content)
-		parts = append(parts, content)
+		return extractContent(lastMsg.Content)
 	}
-
-	return strings.Join(parts, "\n")
+	return ""
 }
 
 // extractContent gets the text content from a ChatMessage content field
