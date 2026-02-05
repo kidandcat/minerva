@@ -1,22 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
+	"os/exec"
 	"strings"
-	"time"
 )
 
-// AIClient handles communication with OpenRouter API
+// AIClient handles communication with Claude Code
 type AIClient struct {
-	apiKey     string
-	httpClient *http.Client
-	baseURL    string
-	models     []string // Priority order
+	workspaceDir string
+	mcpBinary    string
+	dbPath       string
 }
 
 // ChatMessage represents a message in the conversation
@@ -52,7 +49,7 @@ type ToolCallFunc struct {
 	Arguments string `json:"arguments"` // JSON string
 }
 
-// Tool represents a tool available to the assistant
+// Tool represents a tool available to the assistant (kept for compatibility)
 type Tool struct {
 	Type     string       `json:"type"` // "function"
 	Function ToolFunction `json:"function"`
@@ -65,197 +62,157 @@ type ToolFunction struct {
 	Parameters  map[string]any `json:"parameters"` // JSON Schema
 }
 
-// ChatResponse represents the API response
-type ChatResponse struct {
-	ID      string `json:"id"`
-	Choices []struct {
-		Message      ChatMessage `json:"message"`
-		FinishReason string      `json:"finish_reason"`
-	} `json:"choices"`
-	Error *struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    any    `json:"code"` // Can be string or int
-	} `json:"error,omitempty"`
-}
-
-// chatRequest represents the request body for the chat API
-type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Tools    []Tool        `json:"tools,omitempty"`
-}
-
-// DefaultModels is the default model hierarchy (highest priority first)
-// :online suffix enables native web search
-var DefaultModels = []string{
-	"x-ai/grok-4.1-fast:online",
-	"google/gemini-3-flash-preview:online",
-}
-
-// NewAIClient creates a new AI client for OpenRouter
-func NewAIClient(apiKey string, models []string) *AIClient {
-	if len(models) == 0 {
-		models = DefaultModels
-	}
-	return &AIClient{
-		apiKey: apiKey,
-		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
-		},
-		baseURL: "https://openrouter.ai/api/v1",
-		models:  models,
-	}
-}
-
 // ChatResult contains the response and metadata
 type ChatResult struct {
 	Message *ChatMessage
 	Model   string
 }
 
-// Chat sends a chat completion request with automatic fallback
+// ClaudeEvent represents an event from claude's stream-json output
+type ClaudeEvent struct {
+	Type    string `json:"type"`
+	Subtype string `json:"subtype,omitempty"`
+
+	// For result
+	Result     string `json:"result,omitempty"`
+	IsError    bool   `json:"is_error,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+
+	// For system init
+	Model string `json:"model,omitempty"`
+}
+
+// NewAIClient creates a new AI client using Claude Code
+func NewAIClient(apiKey string, models []string) *AIClient {
+	// apiKey and models are ignored - we use Claude Code directly
+	return &AIClient{
+		workspaceDir: "./workspace",
+		mcpBinary:    "./minerva-mcp",
+		dbPath:       "./minerva.db",
+	}
+}
+
+// Chat sends a chat request to Claude Code
 func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Tool) (*ChatResult, error) {
-	// Base system prompt
-	basePrompt := "You are Minerva, a helpful personal AI assistant. You can help with reminders, notes, and general conversation."
-	finalSystemPrompt := basePrompt
-	if systemPrompt != "" {
-		finalSystemPrompt = basePrompt + "\n\n" + systemPrompt
+	// Build the conversation context
+	var prompt strings.Builder
+
+	// Add conversation history
+	for _, msg := range messages {
+		content := extractTextContent(msg.Content)
+		switch msg.Role {
+		case "user":
+			prompt.WriteString(fmt.Sprintf("User: %s\n\n", content))
+		case "assistant":
+			prompt.WriteString(fmt.Sprintf("Assistant: %s\n\n", content))
+		}
 	}
 
-	// Prepend system prompt
-	allMessages := append([]ChatMessage{{
-		Role:    "system",
-		Content: finalSystemPrompt,
-	}}, messages...)
-
-	var lastErr error
-	for _, model := range c.models {
-		resp, err := c.chatWithModel(model, allMessages, tools)
-		if err == nil {
-			return &ChatResult{Message: resp, Model: model}, nil
+	// Get the last user message as the actual prompt
+	lastUserMsg := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			lastUserMsg = extractTextContent(messages[i].Content)
+			break
 		}
+	}
 
-		// Check if error is retryable (availability, rate limit, unsupported input)
-		if isRetryableError(err) {
-			log.Printf("Model %s failed with retryable error: %v, trying next model", model, err)
-			lastErr = err
+	if lastUserMsg == "" {
+		return nil, fmt.Errorf("no user message found")
+	}
+
+	// Build MCP config
+	mcpConfig := map[string]any{
+		"mcpServers": map[string]any{
+			"minerva": map[string]any{
+				"command": c.mcpBinary,
+				"env": map[string]string{
+					"MINERVA_DB": c.dbPath,
+				},
+			},
+		},
+	}
+	mcpConfigJSON, _ := json.Marshal(mcpConfig)
+
+	// Execute claude
+	cmd := exec.Command("claude",
+		"-p",
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--mcp-config", string(mcpConfigJSON),
+		lastUserMsg,
+	)
+	cmd.Dir = c.workspaceDir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("claude execution failed: %v\nstderr: %s", err, stderr.String())
+	}
+
+	// Parse the output
+	var result string
+	var model string
+
+	scanner := bufio.NewScanner(&stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
 			continue
 		}
 
-		// Non-retryable error, return immediately
-		return nil, err
-	}
-
-	return nil, fmt.Errorf("all models failed, last error: %w", lastErr)
-}
-
-// chatWithModel sends a request to a specific model
-func (c *AIClient) chatWithModel(model string, messages []ChatMessage, tools []Tool) (*ChatMessage, error) {
-	reqBody := chatRequest{
-		Model:    model,
-		Messages: messages,
-		Tools:    tools,
-	}
-
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("HTTP-Referer", "https://github.com/kidandcat/minerva")
-	req.Header.Set("X-Title", "Minerva")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, &RetryableError{Err: fmt.Errorf("failed to send request: %w", err)}
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	// Handle HTTP errors
-	if resp.StatusCode != http.StatusOK {
-		// 429 = rate limit, 503 = service unavailable, 502 = bad gateway
-		if resp.StatusCode == 429 || resp.StatusCode == 503 || resp.StatusCode == 502 {
-			return nil, &RetryableError{Err: fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))}
+		var event ClaudeEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
 		}
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
 
-	var chatResp ChatResponse
-	if err := json.Unmarshal(body, &chatResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	// Check for API errors in response
-	if chatResp.Error != nil {
-		errMsg := chatResp.Error.Message
-		// Check for common retryable error patterns
-		if isRetryableErrorMessage(errMsg) {
-			return nil, &RetryableError{Err: fmt.Errorf("API error: %s", errMsg)}
-		}
-		return nil, fmt.Errorf("API error: %s (type: %s)", errMsg, chatResp.Error.Type)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return nil, &RetryableError{Err: fmt.Errorf("no choices returned in response")}
-	}
-
-	return &chatResp.Choices[0].Message, nil
-}
-
-// RetryableError indicates an error that should trigger model fallback
-type RetryableError struct {
-	Err error
-}
-
-func (e *RetryableError) Error() string {
-	return e.Err.Error()
-}
-
-func (e *RetryableError) Unwrap() error {
-	return e.Err
-}
-
-// isRetryableError checks if an error should trigger model fallback
-func isRetryableError(err error) bool {
-	if err == nil {
-		return false
-	}
-	_, ok := err.(*RetryableError)
-	return ok
-}
-
-// isRetryableErrorMessage checks common retryable error patterns
-func isRetryableErrorMessage(msg string) bool {
-	msg = strings.ToLower(msg)
-	retryablePatterns := []string{
-		"rate limit",
-		"overloaded",
-		"capacity",
-		"unavailable",
-		"timeout",
-		"temporarily",
-		"too many requests",
-		"image",      // Unsupported image input
-		"multimodal", // Unsupported multimodal
-		"vision",     // Unsupported vision
-	}
-	for _, pattern := range retryablePatterns {
-		if strings.Contains(msg, pattern) {
-			return true
+		switch event.Type {
+		case "system":
+			if event.Model != "" {
+				model = event.Model
+			}
+		case "result":
+			result = event.Result
+			if event.IsError {
+				return nil, fmt.Errorf("claude error: %s", result)
+			}
 		}
 	}
-	return false
+
+	if result == "" {
+		return nil, fmt.Errorf("no result from claude")
+	}
+
+	return &ChatResult{
+		Message: &ChatMessage{
+			Role:    "assistant",
+			Content: result,
+		},
+		Model: model,
+	}, nil
+}
+
+// extractTextContent extracts text from message content (handles both string and multimodal)
+func extractTextContent(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var texts []string
+		for _, part := range v {
+			if m, ok := part.(map[string]interface{}); ok {
+				if m["type"] == "text" {
+					if text, ok := m["text"].(string); ok {
+						texts = append(texts, text)
+					}
+				}
+			}
+		}
+		return strings.Join(texts, "\n")
+	default:
+		return fmt.Sprintf("%v", content)
+	}
 }

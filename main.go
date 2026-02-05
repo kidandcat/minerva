@@ -63,11 +63,7 @@ func main() {
 	log.Println("Configuration loaded")
 	log.Printf("  Database: %s", config.DatabasePath)
 	log.Printf("  Max context: %d messages", config.MaxContextMessages)
-	if len(config.Models) > 0 {
-		log.Printf("  Models: %v", config.Models)
-	} else {
-		log.Printf("  Models: %v (default)", DefaultModels)
-	}
+	log.Println("  AI: Claude Code (local)")
 
 	// Initialize database
 	db, err = InitDB(config.DatabasePath)
