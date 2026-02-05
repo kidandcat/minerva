@@ -10,9 +10,24 @@ import (
 	"strings"
 )
 
+// chatRequest represents a queued chat request
+type chatRequest struct {
+	messages     []ChatMessage
+	systemPrompt string
+	tools        []Tool
+	resultChan   chan *chatResponse
+}
+
+// chatResponse holds the result of a chat request
+type chatResponse struct {
+	result *ChatResult
+	err    error
+}
+
 // AIClient handles communication with Claude CLI
 type AIClient struct {
 	workspaceDir string
+	queue        chan *chatRequest
 }
 
 // ChatMessage represents a message in the conversation
@@ -91,31 +106,63 @@ func NewAIClient(apiKey string, models []string) *AIClient {
 		workspaceDir = "./workspace"
 	}
 
-	return &AIClient{
+	client := &AIClient{
 		workspaceDir: workspaceDir,
+		queue:        make(chan *chatRequest, 100), // Buffer up to 100 requests
+	}
+
+	// Start the queue processor
+	go client.processQueue()
+
+	return client
+}
+
+// processQueue processes chat requests one at a time
+func (c *AIClient) processQueue() {
+	for req := range c.queue {
+		log.Printf("[AI] Processing queued request (%d in queue)", len(c.queue))
+
+		// Build the prompt
+		prompt := c.buildPrompt(req.messages, req.systemPrompt)
+
+		// Execute claude CLI
+		result, err := c.executeClaude(prompt)
+
+		// Send response back
+		if err != nil {
+			req.resultChan <- &chatResponse{err: err}
+		} else {
+			req.resultChan <- &chatResponse{
+				result: &ChatResult{
+					Message: &ChatMessage{
+						Role:    "assistant",
+						Content: result,
+					},
+					Model: "claude-cli",
+				},
+			}
+		}
 	}
 }
 
-// Chat sends a chat completion request using Claude CLI
+// Chat sends a chat completion request using Claude CLI (queued)
 func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Tool) (*ChatResult, error) {
-	log.Printf("[AI] Chat called with %d messages (using Claude CLI)", len(messages))
+	log.Printf("[AI] Chat called with %d messages, queueing request", len(messages))
 
-	// Build the prompt from conversation history
-	prompt := c.buildPrompt(messages, systemPrompt)
-
-	// Execute claude CLI
-	result, err := c.executeClaude(prompt)
-	if err != nil {
-		return nil, err
+	// Create request with response channel
+	req := &chatRequest{
+		messages:     messages,
+		systemPrompt: systemPrompt,
+		tools:        tools,
+		resultChan:   make(chan *chatResponse, 1),
 	}
 
-	return &ChatResult{
-		Message: &ChatMessage{
-			Role:    "assistant",
-			Content: result,
-		},
-		Model: "claude-cli",
-	}, nil
+	// Queue the request
+	c.queue <- req
+
+	// Wait for response
+	resp := <-req.resultChan
+	return resp.result, resp.err
 }
 
 // buildPrompt constructs the prompt from messages
