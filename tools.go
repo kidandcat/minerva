@@ -43,6 +43,11 @@ func (t *ToolExecutor) Execute(name string, arguments string, bot *Bot) (string,
 		return executeCreateTask(bot, t.userID, arguments)
 	case "get_task_progress":
 		return executeGetTaskProgress(bot, arguments)
+	case "list_agents", "run_claude_task":
+		if bot.agentHub == nil {
+			return "", fmt.Errorf("agent hub not configured")
+		}
+		return ExecuteAgentTool(bot.agentHub, name, arguments)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -316,6 +321,42 @@ func GetToolDefinitions() []Tool {
 						},
 					},
 					"required": []string{"task_id"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        "list_agents",
+				Description: "List all connected Claude Code agents. Agents are remote machines running minerva-agent that can execute Claude Code tasks.",
+				Parameters: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        "run_claude_task",
+				Description: "Run a task on a remote Claude Code agent. The agent will execute the prompt using Claude Code with full permissions and return the result. Use list_agents first to see available agents.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"agent": map[string]any{
+							"type":        "string",
+							"description": "Name of the agent to run the task on",
+						},
+						"prompt": map[string]any{
+							"type":        "string",
+							"description": "The prompt/task for Claude Code to execute",
+						},
+						"dir": map[string]any{
+							"type":        "string",
+							"description": "Optional working directory override (defaults to agent's configured directory)",
+						},
+					},
+					"required": []string{"agent", "prompt"},
 				},
 			},
 		},

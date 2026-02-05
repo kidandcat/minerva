@@ -23,6 +23,7 @@ type Config struct {
 	TwilioAccountSID     string // Twilio Account SID
 	TwilioAuthToken      string // Twilio Auth Token
 	TwilioPhoneNumber    string // Twilio phone number for outbound calls
+	AgentPassword        string // Password for agent authentication
 }
 
 // LoadConfig loads configuration from environment variables
@@ -55,6 +56,7 @@ func LoadConfig() (*Config, error) {
 		TwilioAccountSID:     os.Getenv("TWILIO_ACCOUNT_SID"),
 		TwilioAuthToken:      os.Getenv("TWILIO_AUTH_TOKEN"),
 		TwilioPhoneNumber:    os.Getenv("TWILIO_PHONE_NUMBER"),
+		AgentPassword:        os.Getenv("AGENT_PASSWORD"),
 	}
 
 	if config.TelegramBotToken == "" {

@@ -97,6 +97,14 @@ func main() {
 	bot.taskRunner = NewTaskRunner(bot)
 	log.Println("Task runner initialized")
 
+	// Initialize agent hub
+	bot.agentHub = NewAgentHub(config.AgentPassword)
+	if config.AgentPassword != "" {
+		log.Println("Agent hub initialized (password protected)")
+	} else {
+		log.Println("Agent hub initialized (WARNING: no password set)")
+	}
+
 	// Start reminder checker
 	stopReminders := make(chan struct{})
 	go func() {
@@ -151,7 +159,7 @@ func main() {
 
 	// Start webhook server
 	if config.WebhookPort > 0 {
-		webhook := NewWebhookServer(bot, config.WebhookPort, config.ResendWebhookSecret, twilioManager)
+		webhook := NewWebhookServer(bot, config.WebhookPort, config.ResendWebhookSecret, twilioManager, bot.agentHub)
 		go func() {
 			if err := webhook.Start(); err != nil {
 				log.Printf("Webhook server error: %v", err)

@@ -23,6 +23,7 @@ type Bot struct {
 	running        bool
 	twilioManager  *TwilioCallManager
 	taskRunner     *TaskRunner
+	agentHub       *AgentHub
 }
 
 // NewBot creates a new Telegram bot instance

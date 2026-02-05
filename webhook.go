@@ -43,15 +43,17 @@ type WebhookServer struct {
 	port          int
 	secret        string
 	twilioManager *TwilioCallManager
+	agentHub      *AgentHub
 }
 
 // NewWebhookServer creates a new webhook server
-func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCallManager) *WebhookServer {
+func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCallManager, agentHub *AgentHub) *WebhookServer {
 	return &WebhookServer{
 		bot:           bot,
 		port:          port,
 		secret:        secret,
 		twilioManager: twilioManager,
+		agentHub:      agentHub,
 	}
 }
 
@@ -64,6 +66,12 @@ func (w *WebhookServer) Start() error {
 	if w.twilioManager != nil {
 		http.HandleFunc("/twilio/ws", w.twilioManager.HandleWebSocket)
 		http.HandleFunc("/twilio/voice", w.twilioManager.HandleIncomingCall)
+	}
+
+	// Agent WebSocket endpoint
+	if w.agentHub != nil {
+		http.HandleFunc("/agent", w.agentHub.HandleWebSocket)
+		log.Println("Agent WebSocket endpoint: /agent")
 	}
 
 	addr := fmt.Sprintf(":%d", w.port)
