@@ -20,34 +20,48 @@ import (
 
 var db *DB
 
-const pidFile = "/tmp/minerva.pid"
+const lockFile = "/tmp/minerva.lock"
 
-// acquireLock checks if another instance is running and creates a PID file
+var lockFd *os.File
+
+// acquireLock uses flock to ensure only one instance of minerva runs at a time.
+// If the lock file contains a PID of a dead process, it reclaims the lock.
 func acquireLock() error {
-	// Check if PID file exists
-	if data, err := os.ReadFile(pidFile); err == nil {
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err == nil {
-			// Check if process is still running
-			process, err := os.FindProcess(pid)
-			if err == nil {
-				// Send signal 0 to check if process exists
-				if err := process.Signal(syscall.Signal(0)); err == nil {
-					return fmt.Errorf("another instance is already running (PID %d)", pid)
-				}
-			}
-		}
-		// Stale PID file, remove it
-		os.Remove(pidFile)
+	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("cannot open lock file %s: %w", lockFile, err)
 	}
 
-	// Write current PID
-	return os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644)
+	// Try non-blocking exclusive lock
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err != nil {
+		// Lock held by another process — read the PID for a clear error message
+		data, _ := io.ReadAll(f)
+		f.Close()
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+		if pid > 0 {
+			return fmt.Errorf("another instance is already running (PID %d, lock file: %s)", pid, lockFile)
+		}
+		return fmt.Errorf("another instance is already running (lock file: %s)", lockFile)
+	}
+
+	// Lock acquired — write our PID
+	_ = f.Truncate(0)
+	_, _ = f.Seek(0, 0)
+	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+	_ = f.Sync()
+
+	lockFd = f // keep open so the flock is held for the process lifetime
+	return nil
 }
 
-// releaseLock removes the PID file
+// releaseLock releases the flock and removes the lock file.
 func releaseLock() {
-	os.Remove(pidFile)
+	if lockFd != nil {
+		syscall.Flock(int(lockFd.Fd()), syscall.LOCK_UN)
+		lockFd.Close()
+		os.Remove(lockFile)
+	}
 }
 
 func main() {
