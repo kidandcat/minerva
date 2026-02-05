@@ -69,17 +69,23 @@ func (b *Bot) Start() {
 		}
 
 		if update.Message.IsCommand() {
-			if err := b.handleCommand(update); err != nil {
-				log.Printf("Command error: %v", err)
-				b.sendMessage(update.Message.Chat.ID, fmt.Sprintf("Error: %v", err))
-			}
+			// Handle commands async
+			go func(upd tgbotapi.Update) {
+				if err := b.handleCommand(upd); err != nil {
+					log.Printf("Command error: %v", err)
+					b.sendMessage(upd.Message.Chat.ID, fmt.Sprintf("Error: %v", err))
+				}
+			}(update)
 			continue
 		}
 
-		if err := b.handleMessage(update); err != nil {
-			log.Printf("Message error: %v", err)
-			b.sendMessage(update.Message.Chat.ID, fmt.Sprintf("Error: %v", err))
-		}
+		// Handle messages async
+		go func(upd tgbotapi.Update) {
+			if err := b.handleMessage(upd); err != nil {
+				log.Printf("Message error: %v", err)
+				b.sendMessage(upd.Message.Chat.ID, fmt.Sprintf("Error: %v", err))
+			}
+		}(update)
 	}
 }
 

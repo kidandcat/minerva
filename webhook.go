@@ -125,7 +125,7 @@ func (w *WebhookServer) handleAgentList(rw http.ResponseWriter, r *http.Request)
 	json.NewEncoder(rw).Encode(result)
 }
 
-// handleAgentRun executes a task on an agent
+// handleAgentRun executes a task on an agent asynchronously
 func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(rw, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
@@ -153,18 +153,40 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	result, err := w.agentHub.SendTask(req.Agent, req.Prompt, req.Dir, 10*time.Minute)
-	if err != nil {
-		rw.Header().Set("Content-Type", "application/json")
-		rw.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(rw).Encode(map[string]string{"error": err.Error()})
-		return
-	}
+	// Generate task ID
+	taskID := fmt.Sprintf("%d", time.Now().UnixNano())
 
+	// Run task asynchronously
+	go func(taskID, agent, prompt, dir string) {
+		result, err := w.agentHub.SendTask(agent, prompt, dir, 10*time.Minute)
+
+		// Notify via Telegram when done
+		adminID := w.bot.config.AdminID
+		if adminID == 0 {
+			log.Printf("Agent task %s completed but no admin ID configured", taskID)
+			return
+		}
+
+		var msg string
+		if err != nil {
+			msg = fmt.Sprintf("❌ Agent task failed\n*Agent:* %s\n*Error:* %s", agent, err.Error())
+		} else if result.Error != "" {
+			msg = fmt.Sprintf("⚠️ Agent task completed with error\n*Agent:* %s\n*Error:* %s\n\n*Output:*\n```\n%s\n```", agent, result.Error, truncateText(result.Output, 3000))
+		} else {
+			msg = fmt.Sprintf("✅ Agent task completed\n*Agent:* %s\n\n*Output:*\n```\n%s\n```", agent, truncateText(result.Output, 3000))
+		}
+
+		if err := w.bot.sendMessage(adminID, msg); err != nil {
+			log.Printf("Failed to send agent task notification: %v", err)
+		}
+	}(taskID, req.Agent, req.Prompt, req.Dir)
+
+	// Return immediately
 	rw.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(rw).Encode(map[string]interface{}{
-		"output": result.Output,
-		"error":  result.Error,
+		"status":  "started",
+		"task_id": taskID,
+		"message": fmt.Sprintf("Task started on agent '%s'", req.Agent),
 	})
 }
 

@@ -67,11 +67,13 @@ minerva context
 
 Agents are Claude Code instances running on Jairo's computers. Use them to run coding tasks.
 
+**Important:** Agent tasks are **asynchronous**. The command returns immediately with a task ID, and the result is sent via Telegram when complete. This allows you to run multiple tasks in parallel and continue chatting with the user while tasks run.
+
 ```bash
 # List connected agents and their available projects
 minerva agent list
 
-# Run a task on an agent
+# Run a task on an agent (async - returns immediately)
 minerva agent run <agent-name> "prompt" [--dir /path/to/project]
 ```
 
@@ -86,6 +88,13 @@ minerva agent run mac "git status" --dir /Users/jairo/minerva
 # Run a task without specifying directory (uses agent's home)
 minerva agent run mac "ls -la"
 ```
+
+Response format:
+```json
+{"status": "started", "task_id": "123456", "message": "Task started on agent 'mac'"}
+```
+
+When the task completes, a Telegram notification will be sent with the output.
 
 ## Instructions
 
