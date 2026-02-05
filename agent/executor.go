@@ -28,6 +28,7 @@ func (e *Executor) Run(prompt, workDir string) (*ExecutionResult, error) {
 
 	cmd := exec.Command("claude",
 		"-p",
+		"--continue",
 		"--dangerously-skip-permissions",
 		prompt,
 	)
