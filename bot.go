@@ -45,6 +45,23 @@ func NewBot(config *Config, db *DB, ai *AIClient) (*Bot, error) {
 
 // Start begins the bot's main polling loop
 func (b *Bot) Start() {
+	// Register bot commands menu
+	commands := tgbotapi.NewSetMyCommands(
+		tgbotapi.BotCommand{Command: "start", Description: "Mostrar bienvenida y ayuda"},
+		tgbotapi.BotCommand{Command: "new", Description: "Nueva conversación"},
+		tgbotapi.BotCommand{Command: "history", Description: "Ver conversaciones anteriores"},
+		tgbotapi.BotCommand{Command: "reminders", Description: "Ver recordatorios pendientes"},
+		tgbotapi.BotCommand{Command: "tasks", Description: "Ver tareas en background"},
+		tgbotapi.BotCommand{Command: "memory", Description: "Ver lo que recuerdo de ti"},
+		tgbotapi.BotCommand{Command: "system", Description: "Configurar system prompt"},
+		tgbotapi.BotCommand{Command: "cancel", Description: "Cancelar una tarea"},
+		tgbotapi.BotCommand{Command: "resume", Description: "Reanudar una tarea fallida"},
+		tgbotapi.BotCommand{Command: "status", Description: "Estado de una tarea"},
+	)
+	if _, err := b.api.Request(commands); err != nil {
+		log.Printf("Failed to set bot commands: %v", err)
+	}
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
