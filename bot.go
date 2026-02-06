@@ -1,12 +1,13 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -692,42 +693,40 @@ func (b *Bot) handleMessage(update tgbotapi.Update) error {
 		messages = append(messages, cm)
 	}
 
-	// Build user message content (text or multimodal with image)
-	var userContent any = userMessage
-
-	// Check if message has a photo
+	// Handle images: download to temp file and include path in prompt
 	if len(msg.Photo) > 0 {
-		// Get the largest photo
 		photo := msg.Photo[len(msg.Photo)-1]
-		imageBase64, err := b.downloadFileAsBase64(photo.FileID)
+		imgPath, err := b.downloadFileToTemp(photo.FileID, ".jpg")
 		if err != nil {
 			log.Printf("Failed to download image: %v", err)
 		} else {
-			// Create multimodal content
-			userContent = []ContentPart{
-				{Type: "text", Text: userMessage},
-				{Type: "image_url", ImageURL: &ImageURL{URL: "data:image/jpeg;base64," + imageBase64}},
+			if userMessage == "" {
+				userMessage = "Analyze this image:"
 			}
+			userMessage = fmt.Sprintf("%s %s", userMessage, imgPath)
 		}
 	}
 
-	// Check if message has a document (image file)
 	if msg.Document != nil && strings.HasPrefix(msg.Document.MimeType, "image/") {
-		imageBase64, err := b.downloadFileAsBase64(msg.Document.FileID)
+		ext := filepath.Ext(msg.Document.FileName)
+		if ext == "" {
+			ext = ".jpg"
+		}
+		imgPath, err := b.downloadFileToTemp(msg.Document.FileID, ext)
 		if err != nil {
 			log.Printf("Failed to download document image: %v", err)
 		} else {
-			userContent = []ContentPart{
-				{Type: "text", Text: userMessage},
-				{Type: "image_url", ImageURL: &ImageURL{URL: "data:image/jpeg;base64," + imageBase64}},
+			if userMessage == "" {
+				userMessage = "Analyze this image:"
 			}
+			userMessage = fmt.Sprintf("%s %s", userMessage, imgPath)
 		}
 	}
 
 	// Add user message
 	messages = append(messages, ChatMessage{
 		Role:    "user",
-		Content: userContent,
+		Content: userMessage,
 	})
 
 	// Save user message (text only for DB)
@@ -749,8 +748,8 @@ func (b *Bot) handleMessage(update tgbotapi.Update) error {
 	return b.sendMessage(msg.Chat.ID, response.Content)
 }
 
-// downloadFileAsBase64 downloads a file from Telegram and returns it as base64
-func (b *Bot) downloadFileAsBase64(fileID string) (string, error) {
+// downloadFileToTemp downloads a file from Telegram to a temp file and returns the path
+func (b *Bot) downloadFileToTemp(fileID, ext string) (string, error) {
 	file, err := b.api.GetFile(tgbotapi.FileConfig{FileID: fileID})
 	if err != nil {
 		return "", fmt.Errorf("failed to get file: %w", err)
@@ -764,12 +763,18 @@ func (b *Bot) downloadFileAsBase64(fileID string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	destPath := filepath.Join(os.TempDir(), fmt.Sprintf("telegram_%d%s", time.Now().UnixNano(), ext))
+	out, err := os.Create(destPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read file: %w", err)
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return "", fmt.Errorf("failed to write temp file: %w", err)
 	}
 
-	return base64.StdEncoding.EncodeToString(data), nil
+	return destPath, nil
 }
 
 // AIResponse contains the AI response and model used
