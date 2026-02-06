@@ -158,7 +158,7 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 
 	// Run task asynchronously
 	go func(taskID, agent, prompt, dir string) {
-		result, err := w.agentHub.SendTask(agent, prompt, dir, 10*time.Minute)
+		result, err := w.agentHub.SendTask(agent, prompt, dir, 60*time.Minute)
 
 		// Feed result back to Minerva (the AI brain)
 		w.processAgentResultWithAI(taskID, agent, prompt, dir, result, err)

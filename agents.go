@@ -417,7 +417,7 @@ func ExecuteAgentTool(hub *AgentHub, name, arguments string) (string, error) {
 			return "", fmt.Errorf("invalid arguments: %w", err)
 		}
 
-		result, err := hub.SendTask(args.Agent, args.Prompt, args.Dir, 10*time.Minute)
+		result, err := hub.SendTask(args.Agent, args.Prompt, args.Dir, 60*time.Minute)
 		if err != nil {
 			return "", err
 		}
