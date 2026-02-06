@@ -198,8 +198,8 @@ func (c *Client) handleTask(task Message) {
 		dir = task.Dir
 	}
 
-	// Execute claude
-	result, err := c.executor.Run(task.Prompt, dir)
+	// Execute claude with 55 min timeout (server has 60 min timeout)
+	result, err := c.executor.Run(task.Prompt, dir, 55*time.Minute)
 
 	// Send result
 	msg := Message{

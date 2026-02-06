@@ -210,6 +210,7 @@ func (c *AIClient) executeClaude(prompt string) (string, error) {
 		"-p",
 		"--continue",
 		"--dangerously-skip-permissions",
+		"--model", "opus",
 		"--output-format", "stream-json",
 		"--verbose",
 		prompt,

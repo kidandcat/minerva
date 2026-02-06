@@ -63,7 +63,7 @@ func (tr *TaskRunner) CreateTask(userID int64, description string) (string, erro
 	}
 
 	// Launch Claude Code
-	cmd := exec.Command("claude", "--dangerously-skip-permissions", "-p",
+	cmd := exec.Command("claude", "--dangerously-skip-permissions", "--model", "opus", "-p",
 		"Lee TASK.md y completa la tarea. Actualiza PROGRESS.md con tu progreso regularmente. "+
 			"Tienes libertad total en esta carpeta para crear archivos, buscar en internet, hacer llamadas, etc. "+
 			"Trabaja hasta completar la tarea.")
@@ -142,7 +142,7 @@ func (tr *TaskRunner) LaunchTaskAsync(userID int64, description string) (string,
 	}
 
 	// Launch Claude Code in background with permissions
-	cmd := exec.Command("claude", "--dangerously-skip-permissions", "-p",
+	cmd := exec.Command("claude", "--dangerously-skip-permissions", "--model", "opus", "-p",
 		"Lee TASK.md y completa la tarea. Actualiza PROGRESS.md con tu progreso regularmente. "+
 			"Tienes libertad total en esta carpeta para crear archivos, buscar en internet, hacer llamadas, etc. "+
 			"Trabaja hasta completar la tarea.")
@@ -274,7 +274,7 @@ func (tr *TaskRunner) ResumeTask(taskID string, userID int64) error {
 	}
 
 	// Launch Claude Code again
-	cmd := exec.Command("claude", "--dangerously-skip-permissions", "-p",
+	cmd := exec.Command("claude", "--dangerously-skip-permissions", "--model", "opus", "-p",
 		"Lee TASK.md y PROGRESS.md. Continúa donde lo dejaste. "+
 			"Actualiza PROGRESS.md con tu progreso. "+
 			"Trabaja hasta completar la tarea.")

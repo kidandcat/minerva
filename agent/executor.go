@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"time"
@@ -23,13 +24,18 @@ func NewExecutor() *Executor {
 }
 
 // Run executes a claude prompt and returns the result
-func (e *Executor) Run(prompt, workDir string) (*ExecutionResult, error) {
+func (e *Executor) Run(prompt, workDir string, timeout time.Duration) (*ExecutionResult, error) {
 	start := time.Now()
 
-	cmd := exec.Command("claude",
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx,
+		"claude",
 		"-p",
 		"--continue",
 		"--dangerously-skip-permissions",
+		"--model", "opus",
 		prompt,
 	)
 	cmd.Dir = workDir
