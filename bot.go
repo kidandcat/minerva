@@ -693,33 +693,33 @@ func (b *Bot) handleMessage(update tgbotapi.Update) error {
 		messages = append(messages, cm)
 	}
 
-	// Handle images: download to temp file and include path in prompt
+	// Handle file attachments: download to temp and include path in prompt
 	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
-		imgPath, err := b.downloadFileToTemp(photo.FileID, ".jpg")
+		filePath, err := b.downloadFileToTemp(photo.FileID, ".jpg")
 		if err != nil {
-			log.Printf("Failed to download image: %v", err)
+			log.Printf("Failed to download photo: %v", err)
 		} else {
 			if userMessage == "" {
 				userMessage = "Analyze this image:"
 			}
-			userMessage = fmt.Sprintf("%s %s", userMessage, imgPath)
+			userMessage = fmt.Sprintf("%s %s", userMessage, filePath)
 		}
 	}
 
-	if msg.Document != nil && strings.HasPrefix(msg.Document.MimeType, "image/") {
+	if msg.Document != nil {
 		ext := filepath.Ext(msg.Document.FileName)
 		if ext == "" {
-			ext = ".jpg"
+			ext = ".bin"
 		}
-		imgPath, err := b.downloadFileToTemp(msg.Document.FileID, ext)
+		filePath, err := b.downloadFileToTemp(msg.Document.FileID, ext)
 		if err != nil {
-			log.Printf("Failed to download document image: %v", err)
+			log.Printf("Failed to download document: %v", err)
 		} else {
 			if userMessage == "" {
-				userMessage = "Analyze this image:"
+				userMessage = fmt.Sprintf("Analyze this file (%s):", msg.Document.FileName)
 			}
-			userMessage = fmt.Sprintf("%s %s", userMessage, imgPath)
+			userMessage = fmt.Sprintf("%s %s", userMessage, filePath)
 		}
 	}
 
