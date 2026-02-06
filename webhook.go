@@ -222,6 +222,16 @@ func (w *WebhookServer) processAgentResultWithAI(taskID, agent, prompt, dir stri
 </agent_task_result>
 
 The agent task failed. Please inform the user about this error.`, agent, prompt, dir, taskErr.Error())
+	} else if result == nil {
+		agentResultMsg = fmt.Sprintf(`<agent_task_result>
+<status>error</status>
+<agent>%s</agent>
+<prompt>%s</prompt>
+<dir>%s</dir>
+<error>Agent returned no result</error>
+</agent_task_result>
+
+The agent task returned no result. Please inform the user.`, agent, prompt, dir)
 	} else if result.Error != "" {
 		agentResultMsg = fmt.Sprintf(`<agent_task_result>
 <status>completed_with_error</status>
@@ -236,6 +246,10 @@ The agent task failed. Please inform the user about this error.`, agent, prompt,
 
 The agent task completed but reported an error. Please summarize the result for the user.`, agent, prompt, dir, result.Error, truncateText(result.Output, 10000))
 	} else {
+		output := result.Output
+		if output == "" {
+			output = "(no output produced)"
+		}
 		agentResultMsg = fmt.Sprintf(`<agent_task_result>
 <status>success</status>
 <agent>%s</agent>
@@ -246,7 +260,7 @@ The agent task completed but reported an error. Please summarize the result for 
 </output>
 </agent_task_result>
 
-The agent task completed successfully. Please summarize the result for the user.`, agent, prompt, dir, truncateText(result.Output, 10000))
+The agent task completed successfully. Please summarize the result for the user.`, agent, prompt, dir, truncateText(output, 10000))
 	}
 
 	messages = append(messages, ChatMessage{

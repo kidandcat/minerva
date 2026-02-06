@@ -422,8 +422,16 @@ func ExecuteAgentTool(hub *AgentHub, name, arguments string) (string, error) {
 			return "", err
 		}
 
+		if result == nil {
+			return "Agent returned no result", nil
+		}
+
 		if result.Error != "" {
 			return fmt.Sprintf("Error: %s\n\nOutput:\n%s", result.Error, result.Output), nil
+		}
+
+		if result.Output == "" {
+			return "Task completed successfully (no output)", nil
 		}
 
 		return result.Output, nil
