@@ -200,6 +200,57 @@ Notify the user about this reminder. Then decide:
 	return b.sendMessage(r.UserID, response.Content)
 }
 
+// ProcessSystemEvent processes a system event (like call summaries) through the AI brain
+// This allows the brain to take actions based on system events (create reminders, follow up, etc.)
+func (b *Bot) ProcessSystemEvent(userID int64, eventMessage string) error {
+	// Get user
+	user, _, err := b.db.GetOrCreateUser(userID, "", "")
+	if err != nil {
+		return err
+	}
+
+	// Get active conversation
+	conv, err := b.db.GetActiveConversation(user.ID)
+	if err != nil {
+		return err
+	}
+
+	// Load context
+	dbMessages, err := b.db.GetConversationMessages(conv.ID, b.config.MaxContextMessages)
+	if err != nil {
+		return err
+	}
+
+	var messages []ChatMessage
+	for _, m := range dbMessages {
+		messages = append(messages, ChatMessage{
+			Role:    m.Role,
+			Content: m.Content,
+		})
+	}
+
+	// Add the system event as a user message
+	messages = append(messages, ChatMessage{
+		Role:    "user",
+		Content: eventMessage,
+	})
+
+	// Save the event message
+	b.db.SaveMessage(conv.ID, "user", eventMessage, nil)
+
+	// Chat with AI
+	response, err := b.chatWithAI(messages, user.SystemPrompt, user.ID, conv.ID)
+	if err != nil {
+		return fmt.Errorf("AI error: %w", err)
+	}
+
+	// Save assistant response
+	b.db.SaveMessage(conv.ID, "assistant", response.Content, nil)
+
+	// Send AI response to user
+	return b.sendMessage(userID, response.Content)
+}
+
 // handleCallback handles inline button callbacks
 func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) error {
 	data := callback.Data

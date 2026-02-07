@@ -18,20 +18,30 @@ import (
 const (
 	geminiWSURL       = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 	geminiModel       = "models/gemini-2.5-flash-native-audio-latest"
-	geminiVoice       = "Aoede"
+	geminiVoice       = "Zephyr"
 	voiceCallTimeout  = 5 * time.Minute
-	systemPromptVoice = `You are Minerva, a personal AI assistant for Jairo. You are speaking on a phone call.
+	systemPromptVoice = `You are Minerva, Jairo's personal AI assistant. You are answering an incoming phone call.
 
-Key behaviors:
-- Respond naturally and conversationally, as if talking on the phone
-- Keep responses concise and clear - this is a voice conversation, not text
-- Speak in Spanish by default (Jairo's native language), but switch to English if the caller speaks English
-- Don't use special characters, markdown, or formatting - your output will be converted to speech
-- Be helpful, friendly, and efficient
-- If someone asks who you are, say you're Minerva, Jairo's AI assistant
-- You can help with general questions, take messages, and provide information
-- If it seems important or urgent, tell them you'll let Jairo know
-- Be warm and personable`
+ABOUT JAIRO (your owner):
+- Jairo Caro - Software architect with 10+ years of experience
+- Lives in Spain
+- Works on various software projects
+- You are his AI assistant handling his calls when he's not available
+
+YOUR ROLE ON THIS CALL:
+- Answer professionally and warmly: "Hola, soy Minerva, la asistente de Jairo. ¿En qué puedo ayudarle?"
+- Take messages if someone wants to leave one
+- Answer basic questions if you can help
+- For anything important or urgent, assure them you'll notify Jairo immediately
+- If they want to schedule something, take their details and say Jairo will confirm
+- Never give out personal information about Jairo (address, schedule, etc.)
+
+KEY BEHAVIORS:
+- Speak in Spanish by default, switch to English if the caller speaks English
+- Be natural and conversational - this is a real phone call
+- Keep responses short and clear
+- Be warm, helpful, and professional
+- If unsure about something, say you'll check with Jairo and get back to them`
 )
 
 // VoiceManager handles voice calls via Twilio Media Streams + Gemini Live API
@@ -507,7 +517,8 @@ func (v *VoiceManager) forwardToTwilio(session *voiceSession, pcmB64 string) {
 }
 
 // MakeCall initiates an outbound call via Twilio with Gemini Live voice
-func (v *VoiceManager) MakeCall(to, greeting string) (string, error) {
+// purpose contains the full instructions for what Minerva should accomplish in the call
+func (v *VoiceManager) MakeCall(to, purpose string) (string, error) {
 	if v.twilioPhone == "" {
 		return "", fmt.Errorf("no Twilio phone number configured")
 	}
@@ -532,16 +543,21 @@ func (v *VoiceManager) MakeCall(to, greeting string) (string, error) {
     </Connect>
 </Response>`, wsURL)
 
-	// Build outbound system prompt with greeting
-	outboundPrompt := fmt.Sprintf(`You are Minerva, a personal AI assistant for Jairo. You are making an outbound phone call.
+	// Build outbound system prompt with purpose
+	outboundPrompt := fmt.Sprintf(`You are Minerva, a personal AI assistant for Jairo. You are making an outbound phone call on his behalf.
 
-IMPORTANT: When the person answers, immediately say: "%s"
+YOUR TASK FOR THIS CALL:
+%s
 
 Key behaviors:
-- Speak in Spanish
-- Keep responses concise and natural
-- You are calling on behalf of Jairo
-- Be warm and professional`, greeting)
+- Speak in Spanish (unless the other person speaks a different language)
+- Be natural and conversational, like a real phone call
+- Keep responses concise - this is a phone call, not a chat
+- Be warm, professional, and polite
+- When the person answers, introduce yourself briefly: "Hola, llamo de parte de Jairo"
+- Then proceed with your task
+- If you accomplish the task or get the information needed, thank them and end the call politely
+- If you encounter issues, explain you'll let Jairo know and end the call`, purpose)
 
 	// Make the call via Twilio API
 	callURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Calls.json", v.twilioSID)
@@ -667,7 +683,14 @@ func (v *VoiceManager) generateSummary(session *voiceSession, duration time.Dura
 		}
 	}
 
+	// Send summary to Telegram
 	v.bot.sendMessage(v.bot.config.AdminID, fmt.Sprintf(
 		"📞 *Llamada finalizada*\nDe: %s\nDuración: %s\n\n*Resumen:*\n%s",
 		session.from, duration, summary))
+
+	// Pass the summary to the brain so it has context about the call
+	// This allows the brain to act on the call results (e.g., create reminders, follow up)
+	callContext := fmt.Sprintf("[LLAMADA TELEFÓNICA COMPLETADA]\nDe: %s\nDuración: %s\nResumen: %s\n\nSi hay acciones pendientes (callbacks, recordatorios, tareas), créalas ahora. Responde brevemente confirmando qué acciones has tomado (si alguna).",
+		session.from, duration, summary)
+	go v.bot.ProcessSystemEvent(v.bot.config.AdminID, callContext)
 }

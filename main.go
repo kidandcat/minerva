@@ -123,6 +123,8 @@ func runCLI() {
 		handleContextCLI(db, userID, config.MaxContextMessages)
 	case "agent":
 		handleAgentCLI(config, args)
+	case "call":
+		handleCallCLI(config, args)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command: %s\n", cmd)
 		printUsage()
@@ -145,6 +147,7 @@ Usage:
   minerva context                      Get recent conversation context
   minerva agent list                   List connected agents and their projects
   minerva agent run <name> "prompt" [--dir /path]  Run a task on an agent
+  minerva call <number> "purpose"      Make a phone call with a specific purpose
   minerva help                         Show this help message`)
 }
 
@@ -465,6 +468,38 @@ func handleAgentCLI(config *Config, args []string) {
 		fmt.Fprintf(os.Stderr, "error: unknown agent subcommand: %s\n", subcmd)
 		os.Exit(1)
 	}
+}
+
+func handleCallCLI(config *Config, args []string) {
+	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "error: usage: minerva call <phone_number> \"purpose\"\n")
+		fmt.Fprintf(os.Stderr, "example: minerva call +34612345678 \"Llama a esta peluquería y pide cita para mañana a las 10\"\n")
+		os.Exit(1)
+	}
+
+	phoneNumber := args[0]
+	purpose := args[1]
+
+	// Default to localhost webhook server (port 8081)
+	baseURL := "http://localhost:8081"
+	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
+		baseURL = envURL
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"to":      phoneNumber,
+		"purpose": purpose,
+	})
+
+	resp, err := http.Post(baseURL+"/voice/call", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Println(string(body))
 }
 
 // runBot runs the main Telegram bot

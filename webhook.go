@@ -106,8 +106,8 @@ func (w *WebhookServer) handleVoiceCall(rw http.ResponseWriter, r *http.Request)
 	}
 
 	var req struct {
-		To       string `json:"to"`
-		Greeting string `json:"greeting"`
+		To      string `json:"to"`
+		Purpose string `json:"purpose"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(rw, "Invalid JSON", http.StatusBadRequest)
@@ -118,11 +118,11 @@ func (w *WebhookServer) handleVoiceCall(rw http.ResponseWriter, r *http.Request)
 		http.Error(rw, "Missing 'to' field", http.StatusBadRequest)
 		return
 	}
-	if req.Greeting == "" {
-		req.Greeting = "Hola, soy Minerva, la asistente de Jairo."
+	if req.Purpose == "" {
+		req.Purpose = "Llamar para hablar con la persona y averiguar qué necesita."
 	}
 
-	callSID, err := w.voiceManager.MakeCall(req.To, req.Greeting)
+	callSID, err := w.voiceManager.MakeCall(req.To, req.Purpose)
 	if err != nil {
 		log.Printf("[Voice] Failed to make call: %v", err)
 		json.NewEncoder(rw).Encode(map[string]any{"error": err.Error()})
