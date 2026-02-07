@@ -75,7 +75,8 @@ func (w *WebhookServer) Start() error {
 	if w.voiceManager != nil {
 		http.HandleFunc("/voice/incoming", w.voiceManager.HandleIncoming)
 		http.HandleFunc("/voice/ws", w.voiceManager.HandleMediaStream)
-		log.Println("Voice AI endpoints: /voice/incoming, /voice/ws")
+		http.HandleFunc("/voice/call", w.handleVoiceCall)
+		log.Println("Voice AI endpoints: /voice/incoming, /voice/ws, /voice/call")
 	}
 
 	// Agent WebSocket endpoint
@@ -95,6 +96,47 @@ func (w *WebhookServer) Start() error {
 func (w *WebhookServer) handleHealth(rw http.ResponseWriter, r *http.Request) {
 	rw.WriteHeader(http.StatusOK)
 	rw.Write([]byte("OK"))
+}
+
+// handleVoiceCall initiates an outbound voice call via Gemini Live
+func (w *WebhookServer) handleVoiceCall(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(rw, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		To       string `json:"to"`
+		Greeting string `json:"greeting"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(rw, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.To == "" {
+		http.Error(rw, "Missing 'to' field", http.StatusBadRequest)
+		return
+	}
+	if req.Greeting == "" {
+		req.Greeting = "Hola, soy Minerva, la asistente de Jairo."
+	}
+
+	callSID, err := w.voiceManager.MakeCall(req.To, req.Greeting)
+	if err != nil {
+		log.Printf("[Voice] Failed to make call: %v", err)
+		json.NewEncoder(rw).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	w.bot.sendMessage(w.bot.config.AdminID, fmt.Sprintf("📞 Llamada saliente a %s iniciada", req.To))
+
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(map[string]any{
+		"status":   "calling",
+		"call_sid": callSID,
+		"to":       req.To,
+	})
 }
 
 // handleAgentList returns list of connected agents and their projects

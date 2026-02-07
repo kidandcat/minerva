@@ -584,7 +584,8 @@ func runBot() {
 	// Initialize Voice AI (Gemini Live)
 	var voiceManager *VoiceManager
 	if config.GoogleAPIKey != "" {
-		voiceManager = NewVoiceManager(bot, config.GoogleAPIKey, "https://home.jairo.cloud")
+		voiceManager = NewVoiceManager(bot, config.GoogleAPIKey, "https://home.jairo.cloud",
+			config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber)
 		log.Println("Voice AI (Gemini Live) configured")
 	}
 

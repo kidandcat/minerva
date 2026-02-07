@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -15,9 +16,10 @@ import (
 )
 
 const (
-	geminiWSURL   = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
-	geminiModel   = "models/gemini-2.0-flash-live"
-	geminiVoice   = "Aoede"
+	geminiWSURL       = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+	geminiModel       = "models/gemini-2.0-flash-live"
+	geminiVoice       = "Aoede"
+	voiceCallTimeout  = 5 * time.Minute
 	systemPromptVoice = `You are Minerva, a personal AI assistant for Jairo. You are speaking on a phone call.
 
 Key behaviors:
@@ -34,22 +36,28 @@ Key behaviors:
 
 // VoiceManager handles voice calls via Twilio Media Streams + Gemini Live API
 type VoiceManager struct {
-	bot         *Bot
-	apiKey      string
-	baseURL     string // Public URL (e.g., https://home.jairo.cloud)
-	activeCalls sync.Map
+	bot            *Bot
+	apiKey         string
+	baseURL        string // Public URL (e.g., https://home.jairo.cloud)
+	twilioSID      string
+	twilioToken    string
+	twilioPhone    string
+	activeCalls    sync.Map
+	pendingCalls   sync.Map // callSID → system prompt override for outbound calls
 }
 
 // voiceSession tracks an active voice call
 type voiceSession struct {
-	callSID    string
-	streamSID  string
-	from       string
-	startTime  time.Time
-	geminiConn *websocket.Conn
-	twilioConn *websocket.Conn
-	mu         sync.Mutex
-	closed     bool
+	callSID      string
+	streamSID    string
+	from         string
+	outbound     bool   // true for outbound calls
+	systemPrompt string // custom system prompt for outbound calls
+	startTime    time.Time
+	geminiConn   *websocket.Conn
+	twilioConn   *websocket.Conn
+	mu           sync.Mutex
+	closed       bool
 	// Transcription collected during the call
 	transcript []transcriptEntry
 }
@@ -149,11 +157,14 @@ type geminiServerMsg struct {
 	} `json:"serverContent,omitempty"`
 }
 
-func NewVoiceManager(bot *Bot, apiKey, baseURL string) *VoiceManager {
+func NewVoiceManager(bot *Bot, apiKey, baseURL, twilioSID, twilioToken, twilioPhone string) *VoiceManager {
 	return &VoiceManager{
-		bot:    bot,
-		apiKey: apiKey,
-		baseURL: baseURL,
+		bot:         bot,
+		apiKey:      apiKey,
+		baseURL:     baseURL,
+		twilioSID:   twilioSID,
+		twilioToken: twilioToken,
+		twilioPhone: twilioPhone,
 	}
 }
 
@@ -233,8 +244,17 @@ func (v *VoiceManager) HandleMediaStream(w http.ResponseWriter, r *http.Request)
 			if from, ok := msg.Start.CustomParameters["from"]; ok {
 				session.from = from
 			}
-			log.Printf("[Voice] Stream started: streamSID=%s callSID=%s from=%s",
-				session.streamSID, session.callSID, session.from)
+
+			// Check if this is an outbound call with a custom system prompt
+			if dir, ok := msg.Start.CustomParameters["direction"]; ok && dir == "outbound" {
+				session.outbound = true
+				if prompt, ok := v.pendingCalls.LoadAndDelete(session.callSID); ok {
+					session.systemPrompt = prompt.(string)
+				}
+			}
+
+			log.Printf("[Voice] Stream started: streamSID=%s callSID=%s from=%s outbound=%v",
+				session.streamSID, session.callSID, session.from, session.outbound)
 
 			v.activeCalls.Store(session.callSID, session)
 
@@ -247,6 +267,22 @@ func (v *VoiceManager) HandleMediaStream(w http.ResponseWriter, r *http.Request)
 
 			// Start reading from Gemini and forwarding to Twilio
 			go v.geminiToTwilio(session)
+
+			// Start call timeout (5 minutes max)
+			go func() {
+				timer := time.NewTimer(voiceCallTimeout)
+				defer timer.Stop()
+				<-timer.C
+				session.mu.Lock()
+				closed := session.closed
+				session.mu.Unlock()
+				if !closed {
+					log.Printf("[Voice] Call timeout reached (%s), closing session", voiceCallTimeout)
+					v.closeSession(session)
+					// Close Twilio WebSocket to end the call
+					conn.Close()
+				}
+			}()
 
 		case "media":
 			if msg.Media == nil || session.geminiConn == nil {
@@ -277,12 +313,17 @@ func (v *VoiceManager) connectGemini(session *voiceSession) error {
 	session.geminiConn = conn
 
 	// Build setup message
+	prompt := systemPromptVoice
+	if session.systemPrompt != "" {
+		prompt = session.systemPrompt
+	}
+
 	var setup geminiSetupMsg
 	setup.Setup.Model = geminiModel
 	setup.Setup.GenerationConfig.ResponseModalities = "audio"
 	setup.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName = geminiVoice
 	setup.Setup.SystemInstruction = geminiContent{
-		Parts: []geminiPart{{Text: systemPromptVoice}},
+		Parts: []geminiPart{{Text: prompt}},
 	}
 	setup.Setup.InputAudioTranscription = &struct{}{}
 	setup.Setup.OutputAudioTranscription = &struct{}{}
@@ -463,6 +504,89 @@ func (v *VoiceManager) forwardToTwilio(session *voiceSession, pcmB64 string) {
 	if err := session.twilioConn.WriteJSON(twilioMsg); err != nil {
 		log.Printf("[Voice] Failed to send audio to Twilio: %v", err)
 	}
+}
+
+// MakeCall initiates an outbound call via Twilio with Gemini Live voice
+func (v *VoiceManager) MakeCall(to, greeting string) (string, error) {
+	if v.twilioPhone == "" {
+		return "", fmt.Errorf("no Twilio phone number configured")
+	}
+
+	// Normalize phone number
+	if !strings.HasPrefix(to, "+") {
+		to = "+34" + strings.TrimPrefix(to, "0")
+	}
+
+	// Build TwiML that points to our outbound endpoint
+	wsURL := strings.Replace(v.baseURL, "https://", "wss://", 1)
+	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
+	wsURL += "/voice/ws"
+
+	twiml := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="%s">
+            <Parameter name="from" value="minerva-outbound" />
+            <Parameter name="direction" value="outbound" />
+        </Stream>
+    </Connect>
+</Response>`, wsURL)
+
+	// Build outbound system prompt with greeting
+	outboundPrompt := fmt.Sprintf(`You are Minerva, a personal AI assistant for Jairo. You are making an outbound phone call.
+
+IMPORTANT: When the person answers, immediately say: "%s"
+
+Key behaviors:
+- Speak in Spanish
+- Keep responses concise and natural
+- You are calling on behalf of Jairo
+- Be warm and professional`, greeting)
+
+	// Make the call via Twilio API
+	callURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Calls.json", v.twilioSID)
+
+	data := url.Values{}
+	data.Set("To", to)
+	data.Set("From", v.twilioPhone)
+	data.Set("Twiml", twiml)
+
+	req, err := http.NewRequest("POST", callURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.SetBasicAuth(v.twilioSID, v.twilioToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to initiate call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var result struct {
+		SID     string `json:"sid"`
+		Message string `json:"message"`
+		Code    int    `json:"code"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w (body: %s)", err, string(body))
+	}
+	if resp.StatusCode >= 400 || result.Code != 0 {
+		return "", fmt.Errorf("Twilio error (code %d): %s", result.Code, result.Message)
+	}
+
+	log.Printf("[Voice] Outbound call initiated: SID=%s, To=%s", result.SID, to)
+
+	// Store the outbound system prompt so HandleMediaStream can use it
+	v.pendingCalls.Store(result.SID, outboundPrompt)
+
+	return result.SID, nil
 }
 
 // closeSession cleans up a voice session
