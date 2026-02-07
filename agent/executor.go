@@ -36,6 +36,7 @@ func (e *Executor) Run(prompt, workDir string, timeout time.Duration) (*Executio
 		"--continue",
 		"--dangerously-skip-permissions",
 		"--model", "opus",
+		"--append-system-prompt", "IMPORTANT: You are running in non-interactive mode. If you need clarification or have questions, DO NOT use AskUserQuestion (it will block). Instead, list all your questions in your response text and end your execution. The user will provide answers and run you again.",
 		prompt,
 	)
 	cmd.Dir = workDir
