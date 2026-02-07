@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	geminiWSURL       = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
-	geminiModel       = "models/gemini-2.0-flash-live"
+	geminiWSURL       = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+	geminiModel       = "models/gemini-2.5-flash-native-audio-latest"
 	geminiVoice       = "Aoede"
 	voiceCallTimeout  = 5 * time.Minute
 	systemPromptVoice = `You are Minerva, a personal AI assistant for Jairo. You are speaking on a phone call.
