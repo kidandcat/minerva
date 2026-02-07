@@ -379,8 +379,8 @@ func handleAgentCLI(config *Config, args []string) {
 	subcmd := args[0]
 	subargs := args[1:]
 
-	// Default to localhost webhook server
-	baseURL := "http://localhost:8080"
+	// Default to localhost webhook server (port 8081)
+	baseURL := "http://localhost:8081"
 	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
 		baseURL = envURL
 	}
