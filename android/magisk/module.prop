@@ -1,0 +1,6 @@
+id=minerva-bridge-permissions
+name=Minerva Bridge Permissions
+version=v1.0.0
+versionCode=1
+author=Minerva
+description=Grants CAPTURE_AUDIO_OUTPUT permission to Minerva Bridge for call audio capture
