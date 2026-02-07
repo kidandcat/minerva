@@ -125,6 +125,8 @@ func runCLI() {
 		handleAgentCLI(config, args)
 	case "call":
 		handleCallCLI(config, args)
+	case "phone":
+		handlePhoneCLI(config, args)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command: %s\n", cmd)
 		printUsage()
@@ -147,7 +149,9 @@ Usage:
   minerva context                      Get recent conversation context
   minerva agent list                   List connected agents and their projects
   minerva agent run <name> "prompt" [--dir /path]  Run a task on an agent
-  minerva call <number> "purpose"      Make a phone call with a specific purpose
+  minerva call <number> "purpose"      Make a phone call (via Twilio)
+  minerva phone list                   List connected Android phones
+  minerva phone call <number> "purpose"  Make a call via Android phone
   minerva help                         Show this help message`)
 }
 
@@ -502,6 +506,63 @@ func handleCallCLI(config *Config, args []string) {
 	fmt.Println(string(body))
 }
 
+func handlePhoneCLI(config *Config, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "error: phone subcommand required (list, call)\n")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	// Default to localhost webhook server (port 8081)
+	baseURL := "http://localhost:8081"
+	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
+		baseURL = envURL
+	}
+
+	switch subcmd {
+	case "list":
+		resp, err := http.Get(baseURL + "/phone/list")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println(string(body))
+
+	case "call":
+		if len(subargs) < 2 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva phone call <number> \"purpose\"\n")
+			os.Exit(1)
+		}
+
+		phoneNumber := subargs[0]
+		purpose := subargs[1]
+
+		reqBody, _ := json.Marshal(map[string]string{
+			"to":      phoneNumber,
+			"purpose": purpose,
+		})
+
+		resp, err := http.Post(baseURL+"/phone/call", "application/json", bytes.NewReader(reqBody))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println(string(body))
+
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown phone subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
 // runBot runs the main Telegram bot
 func runBot() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -624,9 +685,16 @@ func runBot() {
 		log.Println("Voice AI (Gemini Live) configured")
 	}
 
+	// Initialize Phone Bridge (Android)
+	var phoneBridge *PhoneBridge
+	if voiceManager != nil {
+		phoneBridge = NewPhoneBridge(bot, voiceManager)
+		log.Println("Phone Bridge (Android) configured")
+	}
+
 	// Start webhook server
 	if config.WebhookPort > 0 {
-		webhook := NewWebhookServer(bot, config.WebhookPort, config.ResendWebhookSecret, twilioManager, bot.agentHub, voiceManager)
+		webhook := NewWebhookServer(bot, config.WebhookPort, config.ResendWebhookSecret, twilioManager, bot.agentHub, voiceManager, phoneBridge)
 		go func() {
 			if err := webhook.Start(); err != nil {
 				log.Printf("Webhook server error: %v", err)

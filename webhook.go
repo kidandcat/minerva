@@ -46,10 +46,11 @@ type WebhookServer struct {
 	twilioManager *TwilioCallManager
 	agentHub      *AgentHub
 	voiceManager  *VoiceManager
+	phoneBridge   *PhoneBridge
 }
 
 // NewWebhookServer creates a new webhook server
-func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCallManager, agentHub *AgentHub, voiceManager *VoiceManager) *WebhookServer {
+func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCallManager, agentHub *AgentHub, voiceManager *VoiceManager, phoneBridge *PhoneBridge) *WebhookServer {
 	return &WebhookServer{
 		bot:           bot,
 		port:          port,
@@ -57,6 +58,7 @@ func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCa
 		twilioManager: twilioManager,
 		agentHub:      agentHub,
 		voiceManager:  voiceManager,
+		phoneBridge:   phoneBridge,
 	}
 }
 
@@ -77,6 +79,14 @@ func (w *WebhookServer) Start() error {
 		http.HandleFunc("/voice/ws", w.voiceManager.HandleMediaStream)
 		http.HandleFunc("/voice/call", w.handleVoiceCall)
 		log.Println("Voice AI endpoints: /voice/incoming, /voice/ws, /voice/call")
+	}
+
+	// Android Phone Bridge endpoint
+	if w.phoneBridge != nil {
+		http.HandleFunc("/phone/ws", w.phoneBridge.HandleWebSocket)
+		http.HandleFunc("/phone/list", w.handlePhoneList)
+		http.HandleFunc("/phone/call", w.handlePhoneCall)
+		log.Println("Phone Bridge endpoints: /phone/ws, /phone/list, /phone/call")
 	}
 
 	// Agent WebSocket endpoint
@@ -136,6 +146,55 @@ func (w *WebhookServer) handleVoiceCall(rw http.ResponseWriter, r *http.Request)
 		"status":   "calling",
 		"call_sid": callSID,
 		"to":       req.To,
+	})
+}
+
+// handlePhoneList returns list of connected phone devices
+func (w *WebhookServer) handlePhoneList(rw http.ResponseWriter, r *http.Request) {
+	if w.phoneBridge == nil {
+		http.Error(rw, `{"error": "phone bridge not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	devices := w.phoneBridge.ListDevices()
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(devices)
+}
+
+// handlePhoneCall initiates an outbound call via Android phone bridge
+func (w *WebhookServer) handlePhoneCall(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(rw, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		DeviceID string `json:"device_id"`
+		To       string `json:"to"`
+		Purpose  string `json:"purpose"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(rw, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.To == "" {
+		http.Error(rw, "Missing 'to' field", http.StatusBadRequest)
+		return
+	}
+
+	if err := w.phoneBridge.MakeCall(req.DeviceID, req.To, req.Purpose); err != nil {
+		log.Printf("[Phone] Failed to make call: %v", err)
+		json.NewEncoder(rw).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	w.bot.sendMessage(w.bot.config.AdminID, fmt.Sprintf("📱 Llamada saliente a %s iniciada (Android)", req.To))
+
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(map[string]any{
+		"status": "calling",
+		"to":     req.To,
 	})
 }
 
