@@ -25,17 +25,22 @@ Use these via Bash to interact with the Minerva system. All output is JSON.
 
 **IMPORTANT:** The Minerva server runs on port **8081**. The CLI uses this port by default.
 
-### Reminders
+### Reminders (Persistent)
+
+Reminders are **persistent** - they are NOT automatically deleted when they fire. They stay active until the user explicitly asks to dismiss them.
 
 ```bash
 # Create a reminder (ISO8601 format for time)
 minerva reminder create "text" --at "2024-02-06T10:00:00Z"
 
-# List pending reminders
+# List active reminders (pending + fired)
 minerva reminder list
 
-# Delete a reminder by ID
+# Dismiss a reminder (ONLY when user explicitly asks)
 minerva reminder delete <id>
+
+# Reschedule a reminder for a new time
+minerva reminder reschedule <id> --at "2024-02-06T10:00:00Z"
 ```
 
 ### Memory (persistent storage about the user)
@@ -100,7 +105,7 @@ When the task completes, a Telegram notification will be sent with the output.
 
 ## Instructions
 
-1. **Reminders**: When user asks to remind them about something, use `minerva reminder create`
+1. **Reminders**: When user asks to remind them about something, use `minerva reminder create`. When a `[REMINDER FIRED]` message arrives, always notify the user and decide autonomously whether to reschedule it for later using `minerva reminder reschedule`. NEVER dismiss reminders yourself - only the user can do that.
 2. **Memory**: Use `minerva memory set` to remember important things about the user
 3. **Communication**: Use `minerva send` to send messages back (only if needed outside normal response)
 4. **Agents**: When user asks about code/projects, first check `minerva agent list` to see available projects, then use `minerva agent run` to execute tasks

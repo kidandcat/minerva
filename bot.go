@@ -113,7 +113,7 @@ func (b *Bot) Stop() {
 	b.api.StopReceivingUpdates()
 }
 
-// CheckReminders checks and sends pending reminders
+// CheckReminders checks pending reminders and routes them through the AI brain
 func (b *Bot) CheckReminders() error {
 	reminders, err := b.db.GetPendingReminders()
 	if err != nil {
@@ -121,32 +121,26 @@ func (b *Bot) CheckReminders() error {
 	}
 
 	for _, r := range reminders {
-		if r.Target == "ai" {
-			// Send to AI for processing
-			if err := b.processAIReminder(r); err != nil {
-				log.Printf("Failed to process AI reminder %d: %v", r.ID, err)
-				continue
-			}
-		} else {
-			// Send directly to user
-			msg := fmt.Sprintf("🔔 *Reminder*\n\n%s", r.Message)
-			if err := b.sendMessage(r.UserID, msg); err != nil {
-				log.Printf("Failed to send reminder %d: %v", r.ID, err)
-				continue
-			}
+		// Mark as fired FIRST to prevent double-processing on next tick
+		if err := b.db.MarkReminderFired(r.ID); err != nil {
+			log.Printf("Failed to mark reminder %d as fired: %v", r.ID, err)
+			continue
 		}
 
-		if err := b.db.MarkReminderSent(r.ID); err != nil {
-			log.Printf("Failed to mark reminder %d as sent: %v", r.ID, err)
+		// ALL reminders go through the AI brain
+		if err := b.processAIReminder(r); err != nil {
+			log.Printf("Failed to process reminder %d: %v", r.ID, err)
+			// Revert to pending so it retries next cycle
+			b.db.RescheduleReminder(r.ID, r.RemindAt)
 		}
 	}
 
 	return nil
 }
 
-// processAIReminder sends a reminder to the AI for processing
+// processAIReminder sends a reminder to the AI brain for processing
 func (b *Bot) processAIReminder(r Reminder) error {
-	log.Printf("Processing AI reminder %d for user %d: %s", r.ID, r.UserID, r.Message)
+	log.Printf("Processing reminder %d for user %d: %s", r.ID, r.UserID, r.Message)
 
 	// Get user
 	user, _, err := b.db.GetOrCreateUser(r.UserID, "", "")
@@ -175,8 +169,16 @@ func (b *Bot) processAIReminder(r Reminder) error {
 		messages = append(messages, cm)
 	}
 
-	// Add reminder as a system-triggered message
-	reminderPrompt := fmt.Sprintf("[SCHEDULED REMINDER - Please act on this]: %s", r.Message)
+	// Add reminder as a system-triggered message with persistent reminder instructions
+	reminderPrompt := fmt.Sprintf(`[REMINDER FIRED - ID: %d]
+Message: %s
+Scheduled: %s
+
+Notify the user about this reminder. Then decide:
+- If the reminder is still relevant (recurring tasks, follow-ups, habits), use reschedule_reminder to set a new future time.
+- If it seems like a one-time reminder, leave it as fired.
+- NEVER delete/dismiss reminders yourself. Only the user can dismiss them explicitly.`, r.ID, r.Message, r.RemindAt.Format("Jan 2, 2006 at 15:04"))
+
 	messages = append(messages, ChatMessage{
 		Role:    "user",
 		Content: reminderPrompt,
@@ -195,9 +197,7 @@ func (b *Bot) processAIReminder(r Reminder) error {
 	b.db.SaveMessage(conv.ID, "assistant", response.Content, nil)
 
 	// Send AI response to user
-	finalMessage := fmt.Sprintf("🤖 *AI Reminder Response*\n\n%s", response.Content)
-
-	return b.sendMessage(r.UserID, finalMessage)
+	return b.sendMessage(r.UserID, response.Content)
 }
 
 // handleCallback handles inline button callbacks

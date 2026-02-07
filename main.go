@@ -137,7 +137,8 @@ Usage:
   minerva                              Run the Telegram bot
   minerva reminder create "text" --at "2024-02-06T10:00:00Z"  Create a reminder
   minerva reminder list                List pending reminders
-  minerva reminder delete <id>         Delete a reminder
+  minerva reminder delete <id>         Dismiss a reminder
+  minerva reminder reschedule <id> --at "time"  Reschedule a reminder
   minerva memory get [key]             Get user memory (all or grep for key)
   minerva memory set "content"         Set/update user memory
   minerva send "message"               Send a message to admin via Telegram
@@ -149,7 +150,7 @@ Usage:
 
 func handleReminderCLI(db *DB, userID int64, args []string) {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "error: reminder subcommand required (create, list, delete)\n")
+		fmt.Fprintf(os.Stderr, "error: reminder subcommand required (create, list, delete, reschedule)\n")
 		os.Exit(1)
 	}
 
@@ -208,6 +209,35 @@ func handleReminderCLI(db *DB, userID int64, args []string) {
 		}
 		argsJSON, _ := json.Marshal(map[string]int64{"id": id})
 		result, err := tools.DeleteReminder(db.DB, userID, string(argsJSON))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(result)
+
+	case "reschedule":
+		if len(subargs) < 3 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva reminder reschedule <id> --at \"2024-02-06T10:00:00Z\"\n")
+			os.Exit(1)
+		}
+		id, err := strconv.ParseInt(subargs[0], 10, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid reminder ID: %v\n", err)
+			os.Exit(1)
+		}
+		var remindAt string
+		for i, arg := range subargs {
+			if arg == "--at" && i+1 < len(subargs) {
+				remindAt = subargs[i+1]
+				break
+			}
+		}
+		if remindAt == "" {
+			fmt.Fprintf(os.Stderr, "error: --at flag is required\n")
+			os.Exit(1)
+		}
+		argsJSON, _ := json.Marshal(map[string]any{"id": id, "remind_at": remindAt})
+		result, err := tools.RescheduleReminder(db.DB, userID, string(argsJSON))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)

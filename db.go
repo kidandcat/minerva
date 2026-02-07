@@ -49,7 +49,7 @@ type Reminder struct {
 	Message   string
 	RemindAt  time.Time
 	Target    string // "user" or "ai"
-	Sent      bool
+	Status    string // "pending", "fired", "done"
 	CreatedAt time.Time
 }
 
@@ -170,7 +170,32 @@ func (db *DB) runMigrations() error {
 	`
 
 	_, err := db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migration: add status column to reminders (replaces sent boolean)
+	var colCount int
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('reminders') WHERE name='status'`).Scan(&colCount)
+	if err != nil {
+		return err
+	}
+	if colCount == 0 {
+		_, err = db.Exec(`ALTER TABLE reminders ADD COLUMN status TEXT DEFAULT 'pending'`)
+		if err != nil {
+			return err
+		}
+		_, err = db.Exec(`UPDATE reminders SET status = CASE WHEN sent = TRUE THEN 'done' ELSE 'pending' END`)
+		if err != nil {
+			return err
+		}
+		_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_reminders_status ON reminders(status, remind_at)`)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // GetOrCreateUser retrieves or creates a user
@@ -363,12 +388,12 @@ func (db *DB) GetUserConversations(userID int64, limit int) ([]Conversation, err
 	return conversations, rows.Err()
 }
 
-// GetPendingReminders retrieves unsent reminders that are due
+// GetPendingReminders retrieves pending reminders that are due
 func (db *DB) GetPendingReminders() ([]Reminder, error) {
 	rows, err := db.Query(`
-		SELECT id, user_id, message, remind_at, target, sent, created_at
+		SELECT id, user_id, message, remind_at, target, COALESCE(status, 'pending'), created_at
 		FROM reminders
-		WHERE sent = FALSE AND remind_at <= ?
+		WHERE (status = 'pending' OR (status IS NULL AND sent = FALSE)) AND remind_at <= ?
 	`, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("failed to query pending reminders: %w", err)
@@ -379,7 +404,7 @@ func (db *DB) GetPendingReminders() ([]Reminder, error) {
 	for rows.Next() {
 		var r Reminder
 		var target sql.NullString
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &r.RemindAt, &target, &r.Sent, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &r.RemindAt, &target, &r.Status, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan reminder: %w", err)
 		}
 		r.Target = "user"
@@ -392,18 +417,30 @@ func (db *DB) GetPendingReminders() ([]Reminder, error) {
 	return reminders, rows.Err()
 }
 
-// MarkReminderSent marks a reminder as sent
-func (db *DB) MarkReminderSent(reminderID int64) error {
-	_, err := db.Exec(`UPDATE reminders SET sent = TRUE WHERE id = ?`, reminderID)
+// MarkReminderFired marks a reminder as fired (being processed by brain)
+func (db *DB) MarkReminderFired(reminderID int64) error {
+	_, err := db.Exec(`UPDATE reminders SET status = 'fired', sent = TRUE WHERE id = ?`, reminderID)
 	return err
 }
 
-// GetUserReminders retrieves pending reminders for a user
+// RescheduleReminder resets a reminder to pending with a new time
+func (db *DB) RescheduleReminder(reminderID int64, newTime time.Time) error {
+	_, err := db.Exec(`UPDATE reminders SET remind_at = ?, status = 'pending', sent = FALSE WHERE id = ?`, newTime, reminderID)
+	return err
+}
+
+// DismissReminder marks a reminder as done (soft delete)
+func (db *DB) DismissReminder(reminderID int64) error {
+	_, err := db.Exec(`UPDATE reminders SET status = 'done', sent = TRUE WHERE id = ?`, reminderID)
+	return err
+}
+
+// GetUserReminders retrieves active reminders for a user (pending + fired)
 func (db *DB) GetUserReminders(userID int64) ([]Reminder, error) {
 	rows, err := db.Query(`
-		SELECT id, user_id, message, remind_at, target, sent, created_at
+		SELECT id, user_id, message, remind_at, target, COALESCE(status, 'pending'), created_at
 		FROM reminders
-		WHERE user_id = ? AND sent = FALSE
+		WHERE user_id = ? AND COALESCE(status, CASE WHEN sent THEN 'done' ELSE 'pending' END) IN ('pending', 'fired')
 		ORDER BY remind_at ASC
 	`, userID)
 	if err != nil {
@@ -415,7 +452,7 @@ func (db *DB) GetUserReminders(userID int64) ([]Reminder, error) {
 	for rows.Next() {
 		var r Reminder
 		var target sql.NullString
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &r.RemindAt, &target, &r.Sent, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &r.RemindAt, &target, &r.Status, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan reminder: %w", err)
 		}
 		r.Target = "user"
