@@ -23,6 +23,7 @@ type Config struct {
 	TwilioAuthToken      string // Twilio Auth Token
 	TwilioPhoneNumber    string // Twilio phone number for outbound calls
 	AgentPassword        string // Password for agent authentication
+	GoogleAPIKey         string // Google API Key for Gemini Live voice
 }
 
 // LoadConfig loads configuration from environment variables
@@ -56,6 +57,7 @@ func LoadConfig() (*Config, error) {
 		TwilioAuthToken:      os.Getenv("TWILIO_AUTH_TOKEN"),
 		TwilioPhoneNumber:    os.Getenv("TWILIO_PHONE_NUMBER"),
 		AgentPassword:        os.Getenv("AGENT_PASSWORD"),
+		GoogleAPIKey:         os.Getenv("GOOGLE_API_KEY"),
 	}
 
 	return config, nil
@@ -92,6 +94,7 @@ func LoadConfigForCLI() (*Config, error) {
 		TwilioAuthToken:     os.Getenv("TWILIO_AUTH_TOKEN"),
 		TwilioPhoneNumber:   os.Getenv("TWILIO_PHONE_NUMBER"),
 		AgentPassword:       os.Getenv("AGENT_PASSWORD"),
+		GoogleAPIKey:        os.Getenv("GOOGLE_API_KEY"),
 	}
 
 	return config, nil

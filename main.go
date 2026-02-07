@@ -551,9 +551,16 @@ func runBot() {
 		}()
 	}
 
+	// Initialize Voice AI (Gemini Live)
+	var voiceManager *VoiceManager
+	if config.GoogleAPIKey != "" {
+		voiceManager = NewVoiceManager(bot, config.GoogleAPIKey, "https://home.jairo.cloud")
+		log.Println("Voice AI (Gemini Live) configured")
+	}
+
 	// Start webhook server
 	if config.WebhookPort > 0 {
-		webhook := NewWebhookServer(bot, config.WebhookPort, config.ResendWebhookSecret, twilioManager, bot.agentHub)
+		webhook := NewWebhookServer(bot, config.WebhookPort, config.ResendWebhookSecret, twilioManager, bot.agentHub, voiceManager)
 		go func() {
 			if err := webhook.Start(); err != nil {
 				log.Printf("Webhook server error: %v", err)

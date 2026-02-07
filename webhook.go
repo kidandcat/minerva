@@ -45,16 +45,18 @@ type WebhookServer struct {
 	secret        string
 	twilioManager *TwilioCallManager
 	agentHub      *AgentHub
+	voiceManager  *VoiceManager
 }
 
 // NewWebhookServer creates a new webhook server
-func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCallManager, agentHub *AgentHub) *WebhookServer {
+func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCallManager, agentHub *AgentHub, voiceManager *VoiceManager) *WebhookServer {
 	return &WebhookServer{
 		bot:           bot,
 		port:          port,
 		secret:        secret,
 		twilioManager: twilioManager,
 		agentHub:      agentHub,
+		voiceManager:  voiceManager,
 	}
 }
 
@@ -67,6 +69,13 @@ func (w *WebhookServer) Start() error {
 	if w.twilioManager != nil {
 		http.HandleFunc("/twilio/ws", w.twilioManager.HandleWebSocket)
 		http.HandleFunc("/twilio/voice", w.twilioManager.HandleIncomingCall)
+	}
+
+	// Voice AI (Gemini Live) endpoints
+	if w.voiceManager != nil {
+		http.HandleFunc("/voice/incoming", w.voiceManager.HandleIncoming)
+		http.HandleFunc("/voice/ws", w.voiceManager.HandleMediaStream)
+		log.Println("Voice AI endpoints: /voice/incoming, /voice/ws")
 	}
 
 	// Agent WebSocket endpoint
