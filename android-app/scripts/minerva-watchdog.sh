@@ -29,6 +29,37 @@ start_agent() {
     fi
 }
 
+# Battery manager - keeps battery between 20% and 80%
+CHARGE_FILE="/sys/class/power_supply/battery/charging_enabled"
+CAPACITY_FILE="/sys/class/power_supply/battery/capacity"
+BATT_HIGH=80
+BATT_LOW=20
+
+start_battery_manager() {
+    if [ ! -f "$CHARGE_FILE" ]; then
+        echo "[$(date)] Battery manager: charging control not available"
+        return
+    fi
+    echo "[$(date)] Battery manager started (range: ${BATT_LOW}%-${BATT_HIGH}%)"
+    while true; do
+        LEVEL=$(cat "$CAPACITY_FILE" 2>/dev/null)
+        CHARGING=$(cat "$CHARGE_FILE" 2>/dev/null)
+        if [ -n "$LEVEL" ]; then
+            if [ "$LEVEL" -ge "$BATT_HIGH" ] && [ "$CHARGING" = "1" ]; then
+                echo 0 > "$CHARGE_FILE"
+                echo "[$(date)] Battery ${LEVEL}% >= ${BATT_HIGH}%, charging OFF"
+            elif [ "$LEVEL" -le "$BATT_LOW" ] && [ "$CHARGING" = "0" ]; then
+                echo 1 > "$CHARGE_FILE"
+                echo "[$(date)] Battery ${LEVEL}% <= ${BATT_LOW}%, charging ON"
+            fi
+        fi
+        sleep 60
+    done
+}
+
+# Start battery manager in background (once)
+start_battery_manager >> "$LOG_DIR/minerva.log" 2>&1 &
+
 while true; do
     echo "[$(date)] Starting Minerva..."
     start_agent
