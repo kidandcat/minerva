@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -25,14 +26,20 @@ type chatResponse struct {
 
 // AIClient handles communication with Claude Code CLI
 type AIClient struct {
-	queue chan *chatRequest
-	mu    sync.Mutex
+	queue        chan *chatRequest
+	mu           sync.Mutex
+	workspaceDir string
 }
 
 // NewAIClient creates a new AI client using Claude Code CLI
 func NewAIClient() *AIClient {
+	workspaceDir := os.Getenv("MINERVA_WORKSPACE")
+	if workspaceDir == "" {
+		workspaceDir = "./workspace"
+	}
 	client := &AIClient{
-		queue: make(chan *chatRequest, 100),
+		queue:        make(chan *chatRequest, 100),
+		workspaceDir: workspaceDir,
 	}
 	go client.processQueue()
 	return client
@@ -75,6 +82,14 @@ func executeClaude(prompt string, workDir string, timeout time.Duration) (string
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	if workDir != "" {
 		cmd.Dir = workDir
+	} else {
+		// Default to workspace directory so Claude reads CLAUDE.md
+		wsDir := os.Getenv("MINERVA_WORKSPACE")
+		if wsDir == "" {
+			wsDir = "./workspace"
+		}
+		_ = os.MkdirAll(wsDir, 0755)
+		cmd.Dir = wsDir
 	}
 
 	var stdout, stderr bytes.Buffer

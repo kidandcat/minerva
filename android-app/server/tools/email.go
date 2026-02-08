@@ -40,7 +40,7 @@ func SendEmail(arguments string) (string, error) {
 	}
 
 	reqBody := map[string]any{
-		"from":    "Minerva <minerva@home.jairo.cloud>",
+		"from":    "Minerva <minerva@jairo.cloud>",
 		"to":      []string{args.To},
 		"subject": args.Subject,
 		"text":    args.Body,

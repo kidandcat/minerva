@@ -44,6 +44,27 @@ func LoadConfig() (*Config, error) {
 	return config, nil
 }
 
+// LoadConfigForCLI loads configuration without requiring TELEGRAM_BOT_TOKEN
+func LoadConfigForCLI() (*Config, error) {
+	_ = godotenv.Overload()
+
+	config := &Config{
+		TelegramBotToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
+		DatabasePath:        getEnvOrDefault("DATABASE_PATH", "./minerva.db"),
+		MaxContextMessages:  getEnvAsIntOrDefault("MAX_CONTEXT_MESSAGES", 20),
+		AdminID:             int64(getEnvAsIntOrDefault("ADMIN_ID", 0)),
+		ResendAPIKey:        os.Getenv("RESEND_API_KEY"),
+		ResendWebhookSecret: os.Getenv("RESEND_WEBHOOK_SECRET"),
+		WebhookPort:         getEnvAsIntOrDefault("WEBHOOK_PORT", 8081),
+		AgentPassword:       os.Getenv("AGENT_PASSWORD"),
+		GoogleAPIKey:        os.Getenv("GOOGLE_API_KEY"),
+		RelayURL:            os.Getenv("RELAY_URL"),
+		RelayKey:            os.Getenv("RELAY_KEY"),
+	}
+
+	return config, nil
+}
+
 func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value

@@ -3,6 +3,7 @@
 # Run via: nohup ./scripts/minerva-watchdog.sh &
 
 MINERVA_BIN="$HOME/minerva"
+AGENT_BIN="$HOME/minerva-agent"
 LOG_DIR="$HOME/minerva-data"
 ENV_FILE="$HOME/.env"
 
@@ -15,8 +16,22 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
+# Set workspace for Claude CLI
+export MINERVA_WORKSPACE="$HOME/workspace"
+
+# Start agent in background (auto-restarts with minerva)
+start_agent() {
+    if [ -x "$AGENT_BIN" ]; then
+        pkill -f minerva-agent 2>/dev/null
+        sleep 1
+        nohup "$AGENT_BIN" -name phone -server ws://localhost:8081/agent >> "$LOG_DIR/agent.log" 2>&1 &
+        echo "[$(date)] Agent started (PID $!)"
+    fi
+}
+
 while true; do
     echo "[$(date)] Starting Minerva..."
+    start_agent
     "$MINERVA_BIN" 2>&1 | tee -a "$LOG_DIR/minerva.log"
     EXIT_CODE=$?
     echo "[$(date)] Minerva exited with code $EXIT_CODE, restarting in 5s..."

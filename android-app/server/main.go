@@ -1,14 +1,22 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"minerva-android/tools"
 )
 
 var startTime time.Time
@@ -17,23 +25,28 @@ func main() {
 	startTime = time.Now()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// On Android, drop from root to Termux user while keeping inet group for network
-	if runtime.GOOS == "android" && os.Getuid() == 0 {
-		dropPrivileges()
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "check" {
-		// Quick health check - verify Claude Code works
-		fmt.Println("Checking Claude Code authentication...")
-		if err := CheckClaudeAuth(); err != nil {
-			fmt.Printf("FAIL: %v\n", err)
-			os.Exit(1)
+	// CLI subcommands
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "check":
+			// Quick health check - verify Claude Code works
+			fmt.Println("Checking Claude Code authentication...")
+			if err := CheckClaudeAuth(); err != nil {
+				fmt.Printf("FAIL: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("OK")
+			os.Exit(0)
+		case "help", "--help", "-h":
+			printUsage()
+			return
+		default:
+			runCLI()
+			return
 		}
-		fmt.Println("OK")
-		os.Exit(0)
 	}
 
-	// Acquire lock to prevent multiple instances
+	// Acquire lock BEFORE dropping privileges (SELinux context issue on Android)
 	lockFile := filepath.Join(os.Getenv("HOME"), ".minerva-android.lock")
 	lock, err := acquireLock(lockFile)
 	if err != nil {
@@ -41,6 +54,12 @@ func main() {
 	}
 	defer lock.Close()
 	defer os.Remove(lockFile)
+
+	// Drop from root to Termux user while keeping inet group for network
+	// Must happen after lock acquisition (SELinux blocks file ops after context change)
+	if os.Getuid() == 0 {
+		dropPrivileges()
+	}
 
 	// Load config
 	config, err := LoadConfig()
@@ -145,6 +164,553 @@ func main() {
 	close(stopReminders)
 	bot.Stop()
 	log.Println("Minerva Android shutdown complete")
+}
+
+// runCLI handles CLI subcommands
+func runCLI() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	cmd := os.Args[1]
+	args := os.Args[2:]
+
+	// Load config for database path and admin ID (without requiring bot tokens)
+	config, err := LoadConfigForCLI()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Initialize database
+	db, err := InitDB(config.DatabasePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to initialize database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	userID := config.AdminID
+	if userID == 0 {
+		fmt.Fprintf(os.Stderr, "error: ADMIN_ID not configured\n")
+		os.Exit(1)
+	}
+
+	switch cmd {
+	case "reminder":
+		handleReminderCLI(db, userID, args)
+	case "memory":
+		handleMemoryCLI(db, userID, args)
+	case "send":
+		handleSendCLI(config, args)
+	case "context":
+		handleContextCLI(db, userID, config.MaxContextMessages)
+	case "agent":
+		handleAgentCLI(config, args)
+	case "email":
+		handleEmailCLI(config, args)
+	case "call":
+		handleCallCLI(config, args)
+	case "phone":
+		handlePhoneCLI(config, args)
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown command: %s\n", cmd)
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println(`Minerva Android CLI - Personal AI Assistant
+
+Usage:
+  minerva-android                              Run the Telegram bot
+  minerva-android check                        Check Claude Code authentication
+  minerva-android reminder create "text" --at "2024-02-06T10:00:00Z"  Create a reminder
+  minerva-android reminder list                List pending reminders
+  minerva-android reminder delete <id>         Dismiss a reminder
+  minerva-android reminder reschedule <id> --at "time"  Reschedule a reminder
+  minerva-android memory get [key]             Get user memory (all or grep for key)
+  minerva-android memory set "content"         Set/update user memory
+  minerva-android send "message"               Send a message to admin via Telegram
+  minerva-android context                      Get recent conversation context
+  minerva-android agent list                   List connected agents and their projects
+  minerva-android agent run <name> "prompt" [--dir /path]  Run a task on an agent
+  minerva-android email send <to> --subject "subject" --body "body"  Send email via Resend
+  minerva-android call <number> "purpose"      Make a phone call (via Twilio)
+  minerva-android phone list                   List connected Android phones
+  minerva-android phone call <number> "purpose"  Make a call via Android phone
+  minerva-android help                         Show this help message`)
+}
+
+func handleReminderCLI(db *DB, userID int64, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "error: reminder subcommand required (create, list, delete, reschedule)\n")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "create":
+		if len(subargs) < 3 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva-android reminder create \"message\" --at \"2024-02-06T10:00:00Z\"\n")
+			os.Exit(1)
+		}
+		message := subargs[0]
+		var remindAt string
+		for i, arg := range subargs {
+			if arg == "--at" && i+1 < len(subargs) {
+				remindAt = subargs[i+1]
+				break
+			}
+		}
+		if remindAt == "" {
+			fmt.Fprintf(os.Stderr, "error: --at flag is required\n")
+			os.Exit(1)
+		}
+
+		argsJSON, _ := json.Marshal(map[string]string{
+			"message":   message,
+			"remind_at": remindAt,
+			"target":    "user",
+		})
+		result, err := tools.CreateReminder(db.DB, userID, string(argsJSON))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(result)
+
+	case "list":
+		result, err := tools.ListReminders(db.DB, userID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(result)
+
+	case "delete":
+		if len(subargs) < 1 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva-android reminder delete <id>\n")
+			os.Exit(1)
+		}
+		id, err := strconv.ParseInt(subargs[0], 10, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid reminder ID: %v\n", err)
+			os.Exit(1)
+		}
+		argsJSON, _ := json.Marshal(map[string]int64{"id": id})
+		result, err := tools.DeleteReminder(db.DB, userID, string(argsJSON))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(result)
+
+	case "reschedule":
+		if len(subargs) < 3 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva-android reminder reschedule <id> --at \"2024-02-06T10:00:00Z\"\n")
+			os.Exit(1)
+		}
+		id, err := strconv.ParseInt(subargs[0], 10, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid reminder ID: %v\n", err)
+			os.Exit(1)
+		}
+		var remindAt string
+		for i, arg := range subargs {
+			if arg == "--at" && i+1 < len(subargs) {
+				remindAt = subargs[i+1]
+				break
+			}
+		}
+		if remindAt == "" {
+			fmt.Fprintf(os.Stderr, "error: --at flag is required\n")
+			os.Exit(1)
+		}
+		argsJSON, _ := json.Marshal(map[string]any{"id": id, "remind_at": remindAt})
+		result, err := tools.RescheduleReminder(db.DB, userID, string(argsJSON))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(result)
+
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown reminder subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func handleMemoryCLI(db *DB, userID int64, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "error: memory subcommand required (get, set)\n")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "get":
+		memory, err := tools.GetMemory(db.DB, userID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if memory == "" {
+			fmt.Println("{\"memory\": null, \"message\": \"No memory stored\"}")
+			return
+		}
+		// If a key is provided, filter the memory
+		if len(subargs) > 0 {
+			key := strings.ToLower(subargs[0])
+			lines := strings.Split(memory, "\n")
+			var filtered []string
+			for _, line := range lines {
+				if strings.Contains(strings.ToLower(line), key) {
+					filtered = append(filtered, line)
+				}
+			}
+			if len(filtered) == 0 {
+				fmt.Printf("{\"memory\": null, \"message\": \"No memory found for key: %s\"}\n", key)
+				return
+			}
+			result, _ := json.Marshal(map[string]any{
+				"memory":     strings.Join(filtered, "\n"),
+				"filtered":   true,
+				"key":        key,
+				"char_count": len(strings.Join(filtered, "\n")),
+			})
+			fmt.Println(string(result))
+			return
+		}
+		result, _ := json.Marshal(map[string]any{
+			"memory":     memory,
+			"char_count": len(memory),
+			"char_limit": 2000,
+		})
+		fmt.Println(string(result))
+
+	case "set":
+		if len(subargs) < 1 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva-android memory set \"content\"\n")
+			os.Exit(1)
+		}
+		content := subargs[0]
+		argsJSON, _ := json.Marshal(map[string]string{"content": content})
+		result, err := tools.UpdateMemory(db.DB, userID, string(argsJSON))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(result)
+
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown memory subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func handleSendCLI(config *Config, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "error: usage: minerva-android send \"message\"\n")
+		os.Exit(1)
+	}
+
+	message := args[0]
+	if config.TelegramBotToken == "" {
+		fmt.Fprintf(os.Stderr, "error: TELEGRAM_BOT_TOKEN not configured\n")
+		os.Exit(1)
+	}
+	if config.AdminID == 0 {
+		fmt.Fprintf(os.Stderr, "error: ADMIN_ID not configured\n")
+		os.Exit(1)
+	}
+
+	api, err := tgbotapi.NewBotAPI(config.TelegramBotToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to create bot API: %v\n", err)
+		os.Exit(1)
+	}
+
+	msg := tgbotapi.NewMessage(config.AdminID, message)
+	msg.ParseMode = "Markdown"
+	_, err = api.Send(msg)
+	if err != nil {
+		// Retry without Markdown
+		msg.ParseMode = ""
+		_, err = api.Send(msg)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to send message: %v\n", err)
+		os.Exit(1)
+	}
+
+	result, _ := json.Marshal(map[string]any{
+		"success": true,
+		"message": "Message sent to admin",
+	})
+	fmt.Println(string(result))
+}
+
+func handleContextCLI(db *DB, userID int64, maxMessages int) {
+	// Get active conversation
+	conv, err := db.GetActiveConversation(userID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Get recent messages
+	messages, err := db.GetConversationMessages(conv.ID, maxMessages)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	type contextMessage struct {
+		Role      string `json:"role"`
+		Content   string `json:"content"`
+		CreatedAt string `json:"created_at"`
+	}
+
+	var contextMessages []contextMessage
+	for _, m := range messages {
+		contextMessages = append(contextMessages, contextMessage{
+			Role:      m.Role,
+			Content:   m.Content,
+			CreatedAt: m.CreatedAt.Format(time.RFC3339),
+		})
+	}
+
+	result, _ := json.Marshal(map[string]any{
+		"conversation_id": conv.ID,
+		"message_count":   len(contextMessages),
+		"messages":        contextMessages,
+	})
+	fmt.Println(string(result))
+}
+
+func handleAgentCLI(config *Config, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "error: agent subcommand required (list, run)\n")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	// Default to localhost webhook server
+	baseURL := fmt.Sprintf("http://localhost:%d", config.WebhookPort)
+	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
+		baseURL = envURL
+	}
+
+	switch subcmd {
+	case "list":
+		resp, err := http.Get(baseURL + "/agent/list")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println(string(body))
+
+	case "run":
+		if len(subargs) < 2 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva-android agent run <agent-name> \"prompt\" [--dir /path]\n")
+			os.Exit(1)
+		}
+
+		agentName := subargs[0]
+		prompt := subargs[1]
+		dir := ""
+
+		// Parse optional --dir flag
+		for i, arg := range subargs {
+			if arg == "--dir" && i+1 < len(subargs) {
+				dir = subargs[i+1]
+				break
+			}
+		}
+
+		reqBody, _ := json.Marshal(map[string]string{
+			"agent":  agentName,
+			"prompt": prompt,
+			"dir":    dir,
+		})
+
+		resp, err := http.Post(baseURL+"/agent/run", "application/json", bytes.NewReader(reqBody))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println(string(body))
+
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown agent subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func handleEmailCLI(config *Config, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "error: email subcommand required (send)\n")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "send":
+		if len(subargs) < 1 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva-android email send <to> --subject \"subject\" --body \"body\"\n")
+			os.Exit(1)
+		}
+
+		to := subargs[0]
+		var subject, body string
+		for i, arg := range subargs {
+			if arg == "--subject" && i+1 < len(subargs) {
+				subject = subargs[i+1]
+			}
+			if arg == "--body" && i+1 < len(subargs) {
+				body = subargs[i+1]
+			}
+		}
+
+		if subject == "" {
+			fmt.Fprintf(os.Stderr, "error: --subject is required\n")
+			os.Exit(1)
+		}
+		if body == "" {
+			fmt.Fprintf(os.Stderr, "error: --body is required\n")
+			os.Exit(1)
+		}
+
+		if config.ResendAPIKey == "" {
+			fmt.Fprintf(os.Stderr, "error: RESEND_API_KEY not configured in .env\n")
+			os.Exit(1)
+		}
+
+		tools.SetResendAPIKey(config.ResendAPIKey)
+
+		argsJSON, _ := json.Marshal(map[string]string{
+			"to":      to,
+			"subject": subject,
+			"body":    body,
+		})
+
+		result, err := tools.SendEmail(string(argsJSON))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(result)
+
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown email subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func handleCallCLI(config *Config, args []string) {
+	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "error: usage: minerva-android call <phone_number> \"purpose\"\n")
+		fmt.Fprintf(os.Stderr, "example: minerva-android call +34612345678 \"Llama a esta peluqueria y pide cita para manana a las 10\"\n")
+		os.Exit(1)
+	}
+
+	phoneNumber := args[0]
+	purpose := args[1]
+
+	// Default to localhost webhook server
+	baseURL := fmt.Sprintf("http://localhost:%d", config.WebhookPort)
+	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
+		baseURL = envURL
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"to":      phoneNumber,
+		"purpose": purpose,
+	})
+
+	resp, err := http.Post(baseURL+"/voice/call", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Println(string(body))
+}
+
+func handlePhoneCLI(config *Config, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "error: phone subcommand required (list, call)\n")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	// Default to localhost webhook server
+	baseURL := fmt.Sprintf("http://localhost:%d", config.WebhookPort)
+	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
+		baseURL = envURL
+	}
+
+	switch subcmd {
+	case "list":
+		resp, err := http.Get(baseURL + "/phone/list")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println(string(body))
+
+	case "call":
+		if len(subargs) < 2 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva-android phone call <number> \"purpose\"\n")
+			os.Exit(1)
+		}
+
+		phoneNumber := subargs[0]
+		purpose := subargs[1]
+
+		reqBody, _ := json.Marshal(map[string]string{
+			"to":      phoneNumber,
+			"purpose": purpose,
+		})
+
+		resp, err := http.Post(baseURL+"/phone/call", "application/json", bytes.NewReader(reqBody))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println(string(body))
+
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown phone subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
 }
 
 // dropPrivileges drops from root to Termux user (u0_a129 / UID 10129)
