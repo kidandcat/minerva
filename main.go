@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,11 +22,12 @@ var db *DB
 var lockFd *os.File
 
 func getLockFile() string {
-	if tmpDir := os.Getenv("TMPDIR"); tmpDir != "" {
-		return tmpDir + "/minerva.lock"
-	}
+	// Prefer HOME over TMPDIR for Android compatibility (SELinux issues with /tmp)
 	if home := os.Getenv("HOME"); home != "" {
 		return home + "/.minerva.lock"
+	}
+	if tmpDir := os.Getenv("TMPDIR"); tmpDir != "" {
+		return tmpDir + "/minerva.lock"
 	}
 	return "/tmp/minerva.lock"
 }
@@ -573,9 +573,6 @@ func handlePhoneCLI(config *Config, args []string) {
 
 // runBot runs the main Telegram bot
 func runBot() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("Starting Minerva - Personal AI Assistant")
-
 	// Check for existing instance
 	if err := acquireLock(); err != nil {
 		log.Fatalf("Failed to start: %v", err)
@@ -590,148 +587,16 @@ func runBot() {
 	log.Println("Configuration loaded")
 	log.Printf("  Database: %s", config.DatabasePath)
 	log.Printf("  Max context: %d messages", config.MaxContextMessages)
-	log.Println("  AI: Claude Code (local)")
+	log.Printf("  AI: OpenRouter API")
 
-	// Initialize database
-	db, err = InitDB(config.DatabasePath)
-	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer db.Close()
-	log.Println("Database initialized")
-
-	// Initialize email
-	if config.ResendAPIKey != "" {
-		tools.SetResendAPIKey(config.ResendAPIKey)
-		log.Println("Email (Resend) configured")
+	// Start server
+	if err := StartServer(config); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
 	}
 
-	// Create AI client
-	ai := NewAIClient(config.OpenRouterAPIKey, config.Models)
+	// Wait for shutdown signal
+	WaitForShutdown()
 
-	// Create bot
-	bot, err := NewBot(config, db, ai)
-	if err != nil {
-		log.Fatalf("Failed to create bot: %v", err)
-	}
-	log.Println("Bot created")
-
-	// Initialize task runner
-	bot.taskRunner = NewTaskRunner(bot)
-	log.Println("Task runner initialized")
-
-	// Initialize agent hub with notification callback
-	agentNotify := func(message string) {
-		if config.AdminID != 0 {
-			bot.sendMessage(config.AdminID, message)
-		}
-	}
-	bot.agentHub = NewAgentHub(config.AgentPassword, agentNotify)
-	if config.AgentPassword != "" {
-		log.Println("Agent hub initialized (password protected)")
-	} else {
-		log.Println("Agent hub initialized (WARNING: no password set)")
-	}
-
-	// Start reminder checker
-	stopReminders := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		log.Println("Reminder checker started")
-
-		for {
-			select {
-			case <-ticker.C:
-				if err := bot.CheckReminders(); err != nil {
-					log.Printf("Reminder check error: %v", err)
-				}
-			case <-stopReminders:
-				return
-			}
-		}
-	}()
-
-	// Graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	// Initialize Twilio
-	var twilioManager *TwilioCallManager
-	if config.TwilioAccountSID != "" && config.TwilioAuthToken != "" {
-		baseURL := "https://home.jairo.cloud"
-		twilioManager = NewTwilioCallManager(bot, config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber, baseURL)
-		bot.twilioManager = twilioManager
-		log.Println("Twilio configured")
-
-		// Start balance checker (alerts when below $5)
-		go func() {
-			ticker := time.NewTicker(1 * time.Hour)
-			defer ticker.Stop()
-			var alerted bool
-			for range ticker.C {
-				balance, err := twilioManager.GetBalance()
-				if err != nil {
-					log.Printf("Failed to check Twilio balance: %v", err)
-					continue
-				}
-				if balance < 5.0 && !alerted {
-					bot.sendMessage(config.AdminID, fmt.Sprintf("⚠️ *Twilio balance bajo*\nSaldo actual: $%.2f", balance))
-					alerted = true
-				} else if balance >= 5.0 {
-					alerted = false
-				}
-			}
-		}()
-	}
-
-	// Initialize Voice AI (Gemini Live)
-	var voiceManager *VoiceManager
-	if config.GoogleAPIKey != "" {
-		voiceManager = NewVoiceManager(bot, config.GoogleAPIKey, "https://home.jairo.cloud",
-			config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber)
-		log.Println("Voice AI (Gemini Live) configured")
-	}
-
-	// Initialize Phone Bridge (Android)
-	var phoneBridge *PhoneBridge
-	if voiceManager != nil {
-		phoneBridge = NewPhoneBridge(bot, voiceManager)
-		log.Println("Phone Bridge (Android) configured")
-	}
-
-	// Start webhook server
-	if config.WebhookPort > 0 {
-		webhook := NewWebhookServer(bot, config.WebhookPort, config.ResendWebhookSecret, twilioManager, bot.agentHub, voiceManager, phoneBridge)
-		go func() {
-			if err := webhook.Start(); err != nil {
-				log.Printf("Webhook server error: %v", err)
-			}
-		}()
-	}
-
-	// Start relay client if configured
-	relayURL := os.Getenv("RELAY_URL")
-	relayKey := os.Getenv("RELAY_KEY")
-	if relayURL != "" && relayKey != "" {
-		relayClient := NewRelayClient(relayURL, relayKey, config.WebhookPort)
-		relayClient.Start()
-		log.Printf("Relay client connected to %s (encrypted)", relayURL)
-		defer relayClient.Stop()
-	}
-
-	// Start bot
-	go func() {
-		log.Println("Starting bot polling...")
-		bot.Start()
-	}()
-
-	// Wait for shutdown
-	sig := <-sigChan
-	log.Printf("Received %v, shutting down...", sig)
-
-	close(stopReminders)
-	bot.Stop()
-
-	log.Println("Minerva shutdown complete")
+	// Stop server
+	StopServer()
 }

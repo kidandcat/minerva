@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Minerva</string>
+    <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="save_config">Save Config</string>
+    <string name="status_stopped">Stopped</string>
+    <string name="status_running">Running</string>
+    <string name="telegram_token_hint">Telegram Bot Token</string>
+    <string name="admin_id_hint">Admin Telegram ID</string>
+    <string name="openrouter_key_hint">OpenRouter API Key</string>
+    <string name="notification_channel_name">Minerva Service</string>
+    <string name="notification_channel_description">Minerva background service notifications</string>
+</resources>

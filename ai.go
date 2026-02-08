@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
-	"os"
-	"os/exec"
-	"strings"
+	"net/http"
+	"time"
 )
 
 // chatRequest represents a queued chat request
@@ -24,18 +24,20 @@ type chatResponse struct {
 	err    error
 }
 
-// AIClient handles communication with Claude CLI
+// AIClient handles communication with OpenRouter API
 type AIClient struct {
-	workspaceDir string
-	queue        chan *chatRequest
+	apiKey     string
+	model      string
+	httpClient *http.Client
+	queue      chan *chatRequest
 }
 
 // ChatMessage represents a message in the conversation
 type ChatMessage struct {
 	Role       string      `json:"role"`                   // "system", "user", "assistant", "tool"
 	Content    interface{} `json:"content"`                // string or []ContentPart for multimodal
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`   // Kept for compatibility but unused
-	ToolCallID string      `json:"tool_call_id,omitempty"` // Kept for compatibility but unused
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`   // Tool calls from assistant
+	ToolCallID string      `json:"tool_call_id,omitempty"` // For tool response messages
 }
 
 // ContentPart represents a part of multimodal content
@@ -50,7 +52,7 @@ type ImageURL struct {
 	URL string `json:"url"` // "data:image/jpeg;base64,..." or URL
 }
 
-// ToolCall represents a tool call made by the assistant (kept for compatibility)
+// ToolCall represents a tool call made by the assistant
 type ToolCall struct {
 	ID       string       `json:"id"`
 	Type     string       `json:"type"` // "function"
@@ -63,7 +65,7 @@ type ToolCallFunc struct {
 	Arguments string `json:"arguments"` // JSON string
 }
 
-// Tool represents a tool available to the assistant (kept for compatibility)
+// Tool represents a tool available to the assistant
 type Tool struct {
 	Type     string       `json:"type"` // "function"
 	Function ToolFunction `json:"function"`
@@ -82,33 +84,49 @@ type ChatResult struct {
 	Model   string
 }
 
-// ClaudeStreamEvent represents an event from Claude CLI's stream-json output
-type ClaudeStreamEvent struct {
-	Type    string `json:"type"`
-	Message string `json:"message,omitempty"`
-	// For result events
-	Subtype      string  `json:"subtype,omitempty"`
-	Result       string  `json:"result,omitempty"`
-	DurationMS   float64 `json:"duration_ms,omitempty"`
-	DurationAPI  float64 `json:"duration_api_ms,omitempty"`
-	IsError      bool    `json:"is_error,omitempty"`
-	SessionID    string  `json:"session_id,omitempty"`
-	TotalCost    float64 `json:"total_cost,omitempty"`
-	InputTokens  int     `json:"input_tokens,omitempty"`
-	OutputTokens int     `json:"output_tokens,omitempty"`
+// OpenRouterRequest is the request body for OpenRouter API
+type OpenRouterRequest struct {
+	Model      string        `json:"model"`
+	Messages   []ChatMessage `json:"messages"`
+	Tools      []Tool        `json:"tools,omitempty"`
+	ToolChoice string        `json:"tool_choice,omitempty"` // "auto", "none", or specific
 }
 
-// NewAIClient creates a new AI client using Claude CLI
+// OpenRouterResponse is the response from OpenRouter API
+type OpenRouterResponse struct {
+	ID      string `json:"id"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Index        int         `json:"index"`
+		Message      ChatMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"` // "stop", "tool_calls", "length"
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error,omitempty"`
+}
+
+// NewAIClient creates a new AI client using OpenRouter API
 func NewAIClient(apiKey string, models []string) *AIClient {
-	// apiKey and models are ignored - Claude CLI uses its own config
-	workspaceDir := os.Getenv("MINERVA_WORKSPACE")
-	if workspaceDir == "" {
-		workspaceDir = "./workspace"
+	model := "x-ai/grok-4.1-fast"
+	if len(models) > 0 && models[0] != "" {
+		model = models[0]
 	}
 
 	client := &AIClient{
-		workspaceDir: workspaceDir,
-		queue:        make(chan *chatRequest, 100), // Buffer up to 100 requests
+		apiKey: apiKey,
+		model:  model,
+		httpClient: &http.Client{
+			Timeout: 120 * time.Second,
+		},
+		queue: make(chan *chatRequest, 100),
 	}
 
 	// Start the queue processor
@@ -122,34 +140,20 @@ func (c *AIClient) processQueue() {
 	for req := range c.queue {
 		log.Printf("[AI] Processing queued request (%d in queue)", len(c.queue))
 
-		// Build the prompt
-		prompt := c.buildPrompt(req.messages, req.systemPrompt)
+		result, err := c.callOpenRouter(req.messages, req.systemPrompt, req.tools)
 
-		// Execute claude CLI
-		result, err := c.executeClaude(prompt)
-
-		// Send response back
 		if err != nil {
 			req.resultChan <- &chatResponse{err: err}
 		} else {
-			req.resultChan <- &chatResponse{
-				result: &ChatResult{
-					Message: &ChatMessage{
-						Role:    "assistant",
-						Content: result,
-					},
-					Model: "claude-cli",
-				},
-			}
+			req.resultChan <- &chatResponse{result: result}
 		}
 	}
 }
 
-// Chat sends a chat completion request using Claude CLI (queued)
+// Chat sends a chat completion request using OpenRouter API (queued)
 func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Tool) (*ChatResult, error) {
 	log.Printf("[AI] Chat called with %d messages, queueing request", len(messages))
 
-	// Create request with response channel
 	req := &chatRequest{
 		messages:     messages,
 		systemPrompt: systemPrompt,
@@ -157,137 +161,96 @@ func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Too
 		resultChan:   make(chan *chatResponse, 1),
 	}
 
-	// Queue the request
 	c.queue <- req
 
-	// Wait for response
 	resp := <-req.resultChan
 	return resp.result, resp.err
 }
 
-// buildPrompt constructs the prompt from messages
-// With --continue, Claude maintains its own context, so we only send the last message
-func (c *AIClient) buildPrompt(messages []ChatMessage, systemPrompt string) string {
-	// Only send the last user message - Claude's --continue handles conversation context
-	if len(messages) > 0 {
-		lastMsg := messages[len(messages)-1]
-		return extractContent(lastMsg.Content)
-	}
-	return ""
-}
+// callOpenRouter makes the actual API call to OpenRouter
+func (c *AIClient) callOpenRouter(messages []ChatMessage, systemPrompt string, tools []Tool) (*ChatResult, error) {
+	// Build messages array with system prompt first
+	var apiMessages []ChatMessage
 
-// extractContent gets the text content from a ChatMessage content field
-func extractContent(content interface{}) string {
-	switch v := content.(type) {
-	case string:
-		return v
-	case []interface{}:
-		// Handle multimodal content - extract text parts
-		var texts []string
-		for _, part := range v {
-			if partMap, ok := part.(map[string]interface{}); ok {
-				if partMap["type"] == "text" {
-					if text, ok := partMap["text"].(string); ok {
-						texts = append(texts, text)
-					}
-				}
-			}
-		}
-		return strings.Join(texts, "\n")
-	default:
-		return fmt.Sprintf("%v", content)
-	}
-}
-
-// executeClaude runs the claude CLI and returns the result
-func (c *AIClient) executeClaude(prompt string) (string, error) {
-	// Ensure workspace directory exists
-	if err := os.MkdirAll(c.workspaceDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create workspace directory: %w", err)
+	if systemPrompt != "" {
+		apiMessages = append(apiMessages, ChatMessage{
+			Role:    "system",
+			Content: systemPrompt,
+		})
 	}
 
-	args := []string{
-		"-p",
-		"--continue",
-		"--dangerously-skip-permissions",
-		"--model", "opus",
-		"--output-format", "stream-json",
-		"--verbose",
-		prompt,
+	// Add conversation messages
+	apiMessages = append(apiMessages, messages...)
+
+	// Build request
+	reqBody := OpenRouterRequest{
+		Model:    c.model,
+		Messages: apiMessages,
 	}
 
-	log.Printf("[AI] Executing claude CLI in %s", c.workspaceDir)
+	if len(tools) > 0 {
+		reqBody.Tools = tools
+		reqBody.ToolChoice = "auto"
+	}
 
-	cmd := exec.Command("claude", args...)
-	cmd.Dir = c.workspaceDir
-
-	// Get stdout pipe for streaming output
-	stdout, err := cmd.StdoutPipe()
+	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to get stdout pipe: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Capture stderr for debugging
-	stderr, err := cmd.StderrPipe()
+	log.Printf("[AI] Calling OpenRouter with model %s, %d messages, %d tools",
+		c.model, len(apiMessages), len(tools))
+
+	// Create HTTP request
+	req, err := http.NewRequest("POST", "https://openrouter.ai/api/v1/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
-		return "", fmt.Errorf("failed to get stderr pipe: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start claude CLI: %w", err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("HTTP-Referer", "https://home.jairo.cloud")
+	req.Header.Set("X-Title", "Minerva")
+
+	// Make request
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Read stderr in background
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			log.Printf("[Claude stderr] %s", scanner.Text())
-		}
-	}()
-
-	// Parse stream-json output
-	var result string
-	scanner := bufio.NewScanner(stdout)
-	// Increase buffer size for large outputs
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024) // 1MB max
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var event ClaudeStreamEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			log.Printf("[AI] Failed to parse event: %s", line)
-			continue
-		}
-
-		// Look for the result event
-		if event.Type == "result" {
-			result = event.Result
-			log.Printf("[AI] Got result (cost: $%.4f, tokens: %d in / %d out)",
-				event.TotalCost, event.InputTokens, event.OutputTokens)
-		}
+	// Parse response
+	var apiResp OpenRouterResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w (body: %s)", err, string(body))
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("[AI] Scanner error: %v", err)
+	// Check for API error
+	if apiResp.Error != nil {
+		return nil, fmt.Errorf("API error: %s (type: %s, code: %s)",
+			apiResp.Error.Message, apiResp.Error.Type, apiResp.Error.Code)
 	}
 
-	if err := cmd.Wait(); err != nil {
-		// If we got a result, don't fail even if exit code is non-zero
-		if result != "" {
-			log.Printf("[AI] Claude exited with error but got result: %v", err)
-		} else {
-			return "", fmt.Errorf("claude CLI failed: %w", err)
-		}
+	// Check for valid response
+	if len(apiResp.Choices) == 0 {
+		return nil, fmt.Errorf("no choices in response: %s", string(body))
 	}
 
-	if result == "" {
-		return "", fmt.Errorf("no result received from claude CLI")
-	}
+	choice := apiResp.Choices[0]
+	log.Printf("[AI] Response received: finish_reason=%s, tokens=%d/%d, tool_calls=%d",
+		choice.FinishReason,
+		apiResp.Usage.PromptTokens,
+		apiResp.Usage.CompletionTokens,
+		len(choice.Message.ToolCalls))
 
-	return result, nil
+	return &ChatResult{
+		Message: &choice.Message,
+		Model:   apiResp.Model,
+	}, nil
 }
