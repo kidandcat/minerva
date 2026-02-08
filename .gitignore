@@ -28,3 +28,7 @@ mcp/minerva-mcp-linux
 # OS
 .DS_Store
 Thumbs.db
+
+# Build artifacts
+minerva-check
+android/

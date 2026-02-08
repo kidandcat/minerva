@@ -1,0 +1,6 @@
+id=minerva-phone-bridge
+name=Minerva Phone Bridge Permissions
+version=v1.0
+versionCode=1
+author=Minerva
+description=Grants CAPTURE_AUDIO_OUTPUT and privileged permissions to Minerva Phone Bridge

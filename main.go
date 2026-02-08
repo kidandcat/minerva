@@ -131,6 +131,8 @@ func runCLI() {
 		handleContextCLI(db, userID, config.MaxContextMessages)
 	case "agent":
 		handleAgentCLI(config, args)
+	case "email":
+		handleEmailCLI(config, args)
 	case "call":
 		handleCallCLI(config, args)
 	case "phone":
@@ -157,6 +159,7 @@ Usage:
   minerva context                      Get recent conversation context
   minerva agent list                   List connected agents and their projects
   minerva agent run <name> "prompt" [--dir /path]  Run a task on an agent
+  minerva email send <to> --subject "subject" --body "body"  Send email via Resend
   minerva call <number> "purpose"      Make a phone call (via Twilio)
   minerva phone list                   List connected Android phones
   minerva phone call <number> "purpose"  Make a call via Android phone
@@ -478,6 +481,68 @@ func handleAgentCLI(config *Config, args []string) {
 
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown agent subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func handleEmailCLI(config *Config, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "error: email subcommand required (send)\n")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "send":
+		if len(subargs) < 1 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva email send <to> --subject \"subject\" --body \"body\"\n")
+			os.Exit(1)
+		}
+
+		to := subargs[0]
+		var subject, body string
+		for i, arg := range subargs {
+			if arg == "--subject" && i+1 < len(subargs) {
+				subject = subargs[i+1]
+			}
+			if arg == "--body" && i+1 < len(subargs) {
+				body = subargs[i+1]
+			}
+		}
+
+		if subject == "" {
+			fmt.Fprintf(os.Stderr, "error: --subject is required\n")
+			os.Exit(1)
+		}
+		if body == "" {
+			fmt.Fprintf(os.Stderr, "error: --body is required\n")
+			os.Exit(1)
+		}
+
+		if config.ResendAPIKey == "" {
+			fmt.Fprintf(os.Stderr, "error: RESEND_API_KEY not configured in .env\n")
+			os.Exit(1)
+		}
+
+		tools.SetResendAPIKey(config.ResendAPIKey)
+
+		argsJSON, _ := json.Marshal(map[string]string{
+			"to":      to,
+			"subject": subject,
+			"body":    body,
+		})
+
+		result, err := tools.SendEmail(string(argsJSON))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(result)
+
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown email subcommand: %s\n", subcmd)
 		os.Exit(1)
 	}
 }
