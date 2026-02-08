@@ -5,7 +5,7 @@
 Go monolith deployed to VPS (51.254.142.231) via `scp` + `systemctl restart minerva`.
 Reverse proxy: Caddy at `/etc/caddy/Caddyfile`, domain: `home.jairo.cloud` -> `localhost:8081`.
 
-- **AI Backend**: OpenRouter API (multi-model with fallback)
+- **AI Backend**: Claude CLI (`claude -p`)
 - **Database**: SQLite at configured `DATABASE_PATH`
 - **Server Port**: 8081 (env: `WEBHOOK_PORT`)
 - **Telegram Bot**: Long-polling, single admin user
@@ -27,9 +27,8 @@ ssh ubuntu@51.254.142.231 'sudo cp /tmp/minerva-server /home/ubuntu/minerva && s
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | Telegram bot token from @BotFather |
 | `ADMIN_ID` | Yes | Telegram user ID (int64) |
-| `OPENROUTER_API_KEY` | Yes | OpenRouter API key |
 | `DATABASE_PATH` | No | SQLite path (default: `./minerva.db`) |
-| `MODELS` | No | Comma-separated model priority list |
+| `MINERVA_WORKSPACE` | No | Workspace dir for Claude CLI (default: `./workspace`) |
 | `MAX_CONTEXT_MESSAGES` | No | Context window size (default: 20) |
 | `RESEND_API_KEY` | No | Resend API key for sending emails |
 | `RESEND_WEBHOOK_SECRET` | No | Svix webhook signing secret for receiving emails |
@@ -116,7 +115,7 @@ Status flow: `pending` -> `fired` -> `done`
 | `config.go` | Environment config loading |
 | `server.go` | Server lifecycle management |
 | `bot.go` | Telegram bot logic + commands |
-| `ai.go` | OpenRouter API client (multi-model) |
+| `ai.go` | Claude CLI client (`claude -p`) |
 | `db.go` | SQLite database layer |
 | `tools.go` | Tool definitions + executor |
 | `voice.go` | Gemini Live voice (Twilio integration) |

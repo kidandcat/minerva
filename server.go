@@ -56,8 +56,8 @@ func StartServer(config *Config) error {
 	}
 
 	// Create AI client
-	ai := NewAIClient(config.OpenRouterAPIKey, config.Models)
-	log.Printf("AI client initialized (model: %s)", ai.model)
+	ai := NewAIClient()
+	log.Println("AI client initialized (Claude CLI)")
 
 	// Create bot
 	bot, err := NewBot(config, db, ai)

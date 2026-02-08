@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -11,9 +10,7 @@ import (
 // Config holds all configuration for the Minerva bot
 type Config struct {
 	TelegramBotToken   string
-	OpenRouterAPIKey   string
 	DatabasePath       string
-	Models             []string // Priority hierarchy of models
 	MaxContextMessages int
 	AdminID            int64  // Telegram user ID of the admin
 	ResendAPIKey         string // Resend API key for email
@@ -31,33 +28,19 @@ func LoadConfig() (*Config, error) {
 	// Load .env file (overrides existing env vars)
 	_ = godotenv.Overload()
 
-	// Parse models from comma-separated list
-	modelsStr := os.Getenv("MODELS")
-	var models []string
-	if modelsStr != "" {
-		for _, m := range strings.Split(modelsStr, ",") {
-			m = strings.TrimSpace(m)
-			if m != "" {
-				models = append(models, m)
-			}
-		}
-	}
-
 	config := &Config{
 		TelegramBotToken:   os.Getenv("TELEGRAM_BOT_TOKEN"),
-		OpenRouterAPIKey:   os.Getenv("OPENROUTER_API_KEY"),
 		DatabasePath:       getEnvOrDefault("DATABASE_PATH", "./minerva.db"),
-		Models:             models, // Empty means use DefaultModels
 		MaxContextMessages: getEnvAsIntOrDefault("MAX_CONTEXT_MESSAGES", 20),
 		AdminID:            int64(getEnvAsIntOrDefault("ADMIN_ID", 0)),
-		ResendAPIKey:         os.Getenv("RESEND_API_KEY"),
-		ResendWebhookSecret:  os.Getenv("RESEND_WEBHOOK_SECRET"),
-		WebhookPort:          getEnvAsIntOrDefault("WEBHOOK_PORT", 8080),
-		TwilioAccountSID:     os.Getenv("TWILIO_ACCOUNT_SID"),
-		TwilioAuthToken:      os.Getenv("TWILIO_AUTH_TOKEN"),
-		TwilioPhoneNumber:    os.Getenv("TWILIO_PHONE_NUMBER"),
-		AgentPassword:        os.Getenv("AGENT_PASSWORD"),
-		GoogleAPIKey:         os.Getenv("GOOGLE_API_KEY"),
+		ResendAPIKey:       os.Getenv("RESEND_API_KEY"),
+		ResendWebhookSecret: os.Getenv("RESEND_WEBHOOK_SECRET"),
+		WebhookPort:        getEnvAsIntOrDefault("WEBHOOK_PORT", 8080),
+		TwilioAccountSID:   os.Getenv("TWILIO_ACCOUNT_SID"),
+		TwilioAuthToken:    os.Getenv("TWILIO_AUTH_TOKEN"),
+		TwilioPhoneNumber:  os.Getenv("TWILIO_PHONE_NUMBER"),
+		AgentPassword:      os.Getenv("AGENT_PASSWORD"),
+		GoogleAPIKey:       os.Getenv("GOOGLE_API_KEY"),
 	}
 
 	return config, nil
@@ -68,23 +51,9 @@ func LoadConfigForCLI() (*Config, error) {
 	// Load .env file (overrides existing env vars)
 	_ = godotenv.Overload()
 
-	// Parse models from comma-separated list
-	modelsStr := os.Getenv("MODELS")
-	var models []string
-	if modelsStr != "" {
-		for _, m := range strings.Split(modelsStr, ",") {
-			m = strings.TrimSpace(m)
-			if m != "" {
-				models = append(models, m)
-			}
-		}
-	}
-
 	config := &Config{
 		TelegramBotToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
-		OpenRouterAPIKey:    os.Getenv("OPENROUTER_API_KEY"),
 		DatabasePath:        getEnvOrDefault("DATABASE_PATH", "./minerva.db"),
-		Models:              models,
 		MaxContextMessages:  getEnvAsIntOrDefault("MAX_CONTEXT_MESSAGES", 20),
 		AdminID:             int64(getEnvAsIntOrDefault("ADMIN_ID", 0)),
 		ResendAPIKey:        os.Getenv("RESEND_API_KEY"),

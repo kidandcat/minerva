@@ -652,7 +652,7 @@ func runBot() {
 	log.Println("Configuration loaded")
 	log.Printf("  Database: %s", config.DatabasePath)
 	log.Printf("  Max context: %d messages", config.MaxContextMessages)
-	log.Printf("  AI: OpenRouter API")
+	log.Printf("  AI: Claude CLI")
 
 	// Start server
 	if err := StartServer(config); err != nil {

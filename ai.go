@@ -2,11 +2,12 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -24,20 +25,18 @@ type chatResponse struct {
 	err    error
 }
 
-// AIClient handles communication with OpenRouter API
+// AIClient handles communication with Claude CLI
 type AIClient struct {
-	apiKey     string
-	model      string
-	httpClient *http.Client
-	queue      chan *chatRequest
+	workspaceDir string
+	queue        chan *chatRequest
 }
 
 // ChatMessage represents a message in the conversation
 type ChatMessage struct {
 	Role       string      `json:"role"`                   // "system", "user", "assistant", "tool"
 	Content    interface{} `json:"content"`                // string or []ContentPart for multimodal
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`   // Tool calls from assistant
-	ToolCallID string      `json:"tool_call_id,omitempty"` // For tool response messages
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`   // Kept for DB compatibility
+	ToolCallID string      `json:"tool_call_id,omitempty"` // Kept for DB compatibility
 }
 
 // ContentPart represents a part of multimodal content
@@ -84,52 +83,18 @@ type ChatResult struct {
 	Model   string
 }
 
-// OpenRouterRequest is the request body for OpenRouter API
-type OpenRouterRequest struct {
-	Model      string        `json:"model"`
-	Messages   []ChatMessage `json:"messages"`
-	Tools      []Tool        `json:"tools,omitempty"`
-	ToolChoice string        `json:"tool_choice,omitempty"` // "auto", "none", or specific
-}
-
-// OpenRouterResponse is the response from OpenRouter API
-type OpenRouterResponse struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Index        int         `json:"index"`
-		Message      ChatMessage `json:"message"`
-		FinishReason string      `json:"finish_reason"` // "stop", "tool_calls", "length"
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
-	Error *struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    string `json:"code"`
-	} `json:"error,omitempty"`
-}
-
-// NewAIClient creates a new AI client using OpenRouter API
-func NewAIClient(apiKey string, models []string) *AIClient {
-	model := "x-ai/grok-4.1-fast"
-	if len(models) > 0 && models[0] != "" {
-		model = models[0]
+// NewAIClient creates a new AI client using Claude CLI
+func NewAIClient() *AIClient {
+	workspaceDir := os.Getenv("MINERVA_WORKSPACE")
+	if workspaceDir == "" {
+		workspaceDir = "./workspace"
 	}
 
 	client := &AIClient{
-		apiKey: apiKey,
-		model:  model,
-		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
-		},
-		queue: make(chan *chatRequest, 100),
+		workspaceDir: workspaceDir,
+		queue:        make(chan *chatRequest, 100),
 	}
 
-	// Start the queue processor
 	go client.processQueue()
 
 	return client
@@ -140,17 +105,26 @@ func (c *AIClient) processQueue() {
 	for req := range c.queue {
 		log.Printf("[AI] Processing queued request (%d in queue)", len(c.queue))
 
-		result, err := c.callOpenRouter(req.messages, req.systemPrompt, req.tools)
+		prompt := c.buildPrompt(req.messages, req.systemPrompt)
+		result, err := c.executeClaude(prompt)
 
 		if err != nil {
 			req.resultChan <- &chatResponse{err: err}
 		} else {
-			req.resultChan <- &chatResponse{result: result}
+			req.resultChan <- &chatResponse{
+				result: &ChatResult{
+					Message: &ChatMessage{
+						Role:    "assistant",
+						Content: result,
+					},
+					Model: "claude",
+				},
+			}
 		}
 	}
 }
 
-// Chat sends a chat completion request using OpenRouter API (queued)
+// Chat sends a chat completion request using Claude CLI (queued)
 func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Tool) (*ChatResult, error) {
 	log.Printf("[AI] Chat called with %d messages, queueing request", len(messages))
 
@@ -167,90 +141,96 @@ func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Too
 	return resp.result, resp.err
 }
 
-// callOpenRouter makes the actual API call to OpenRouter
-func (c *AIClient) callOpenRouter(messages []ChatMessage, systemPrompt string, tools []Tool) (*ChatResult, error) {
-	// Build messages array with system prompt first
-	var apiMessages []ChatMessage
+// buildPrompt constructs the full prompt from messages and system prompt
+func (c *AIClient) buildPrompt(messages []ChatMessage, systemPrompt string) string {
+	var sb strings.Builder
 
 	if systemPrompt != "" {
-		apiMessages = append(apiMessages, ChatMessage{
-			Role:    "system",
-			Content: systemPrompt,
-		})
+		sb.WriteString(systemPrompt)
+		sb.WriteString("\n\n")
 	}
 
-	// Add conversation messages
-	apiMessages = append(apiMessages, messages...)
-
-	// Build request
-	reqBody := OpenRouterRequest{
-		Model:    c.model,
-		Messages: apiMessages,
+	// Conversation history (all but last message)
+	if len(messages) > 1 {
+		sb.WriteString("[CONVERSATION HISTORY]\n")
+		for _, m := range messages[:len(messages)-1] {
+			content := extractContent(m.Content)
+			sb.WriteString(fmt.Sprintf("%s: %s\n", m.Role, content))
+		}
+		sb.WriteString("\n")
 	}
 
-	if len(tools) > 0 {
-		reqBody.Tools = tools
-		reqBody.ToolChoice = "auto"
+	// Current message
+	if len(messages) > 0 {
+		lastMsg := messages[len(messages)-1]
+		sb.WriteString(extractContent(lastMsg.Content))
 	}
 
-	jsonBody, err := json.Marshal(reqBody)
+	return sb.String()
+}
+
+// extractContent gets the text content from a ChatMessage content field
+func extractContent(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var texts []string
+		for _, part := range v {
+			if partMap, ok := part.(map[string]interface{}); ok {
+				if partMap["type"] == "text" {
+					if text, ok := partMap["text"].(string); ok {
+						texts = append(texts, text)
+					}
+				}
+			}
+		}
+		return strings.Join(texts, "\n")
+	default:
+		return fmt.Sprintf("%v", content)
+	}
+}
+
+// executeClaude runs the claude CLI and returns the result
+func (c *AIClient) executeClaude(prompt string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if err := os.MkdirAll(c.workspaceDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create workspace directory: %w", err)
+	}
+
+	args := []string{
+		"-p",
+		"--dangerously-skip-permissions",
+		"--output-format", "text",
+		prompt,
+	}
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = c.workspaceDir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	log.Printf("[AI] Running claude -p in %s: %s", c.workspaceDir, truncate(prompt, 100))
+
+	err := cmd.Run()
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("claude timed out after 5 minutes")
+		}
+		errMsg := strings.TrimSpace(stderr.String())
+		outMsg := strings.TrimSpace(stdout.String())
+		log.Printf("[AI] Claude failed: err=%v stderr=%q stdout=%q", err, truncate(errMsg, 300), truncate(outMsg, 300))
+		if errMsg != "" {
+			return "", fmt.Errorf("claude error: %w\nstderr: %s", err, errMsg)
+		}
+		return "", fmt.Errorf("claude error: %w", err)
 	}
 
-	log.Printf("[AI] Calling OpenRouter with model %s, %d messages, %d tools",
-		c.model, len(apiMessages), len(tools))
-
-	// Create HTTP request
-	req, err := http.NewRequest("POST", "https://openrouter.ai/api/v1/chat/completions", bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("HTTP-Referer", "https://home.jairo.cloud")
-	req.Header.Set("X-Title", "Minerva")
-
-	// Make request
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Parse response
-	var apiResp OpenRouterResponse
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w (body: %s)", err, string(body))
-	}
-
-	// Check for API error
-	if apiResp.Error != nil {
-		return nil, fmt.Errorf("API error: %s (type: %s, code: %s)",
-			apiResp.Error.Message, apiResp.Error.Type, apiResp.Error.Code)
-	}
-
-	// Check for valid response
-	if len(apiResp.Choices) == 0 {
-		return nil, fmt.Errorf("no choices in response: %s", string(body))
-	}
-
-	choice := apiResp.Choices[0]
-	log.Printf("[AI] Response received: finish_reason=%s, tokens=%d/%d, tool_calls=%d",
-		choice.FinishReason,
-		apiResp.Usage.PromptTokens,
-		apiResp.Usage.CompletionTokens,
-		len(choice.Message.ToolCalls))
-
-	return &ChatResult{
-		Message: &choice.Message,
-		Model:   apiResp.Model,
-	}, nil
+	output := strings.TrimSpace(stdout.String())
+	log.Printf("[AI] Claude response: %s", truncate(output, 200))
+	return output, nil
 }

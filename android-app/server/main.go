@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -15,6 +16,11 @@ var startTime time.Time
 func main() {
 	startTime = time.Now()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	// On Android, drop from root to Termux user while keeping inet group for network
+	if runtime.GOOS == "android" && os.Getuid() == 0 {
+		dropPrivileges()
+	}
 
 	if len(os.Args) > 1 && os.Args[1] == "check" {
 		// Quick health check - verify Claude Code works
@@ -139,6 +145,33 @@ func main() {
 	close(stopReminders)
 	bot.Stop()
 	log.Println("Minerva Android shutdown complete")
+}
+
+// dropPrivileges drops from root to Termux user (u0_a129 / UID 10129)
+// while keeping supplementary groups for network access (inet=3003).
+// This allows Claude Code CLI to use --dangerously-skip-permissions
+// which refuses to run as root.
+func dropPrivileges() {
+	const (
+		termuxUID = 10129
+		termuxGID = 10129
+		inetGID   = 3003 // Android network access group
+		everyGID  = 9997 // Android everybody group
+	)
+
+	groups := []int{termuxGID, inetGID, everyGID}
+
+	if err := syscall.Setgroups(groups); err != nil {
+		log.Printf("WARNING: setgroups failed: %v (network may not work)", err)
+	}
+	if err := syscall.Setgid(termuxGID); err != nil {
+		log.Printf("WARNING: setgid failed: %v", err)
+	}
+	if err := syscall.Setuid(termuxUID); err != nil {
+		log.Printf("WARNING: setuid failed: %v", err)
+	}
+
+	log.Printf("Dropped privileges to uid=%d gid=%d groups=%v", os.Getuid(), os.Getgid(), groups)
 }
 
 // acquireLock creates an exclusive file lock

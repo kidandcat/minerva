@@ -88,8 +88,9 @@ func executeClaude(prompt string, workDir string, timeout time.Duration) (string
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("claude timed out after %v", timeout)
 		}
-		// Include stderr in error for debugging
-		errMsg := stderr.String()
+		errMsg := strings.TrimSpace(stderr.String())
+		outMsg := strings.TrimSpace(stdout.String())
+		log.Printf("[AI] Claude failed: err=%v stderr=%q stdout=%q", err, truncateStr(errMsg, 300), truncateStr(outMsg, 300))
 		if errMsg != "" {
 			return "", fmt.Errorf("claude error: %w\nstderr: %s", err, errMsg)
 		}
