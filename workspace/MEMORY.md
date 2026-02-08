@@ -24,6 +24,12 @@ Check `minerva agent list` for current project list on each agent.
 
 (To be filled as learned)
 
+## Active Reminders (as of Feb 8, 2026)
+
+- ID 8: "Baja a ver si la moto arranca"
+- ID 9: "Presupuestar la publicidad de la app de pisos para policía"
+- ID 10: "Pagar la multa"
+
 ## Notes
 
 (To be filled as needed)
