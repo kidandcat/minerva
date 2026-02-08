@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.minerva.bridge"
-        minSdk = 28
+        minSdk = 26
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
