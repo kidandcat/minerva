@@ -1,12 +1,9 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -24,10 +21,11 @@ type chatResponse struct {
 	err    error
 }
 
-// AIClient handles communication with Claude CLI
+// AIClient handles communication with AI APIs
 type AIClient struct {
-	workspaceDir string
-	queue        chan *chatRequest
+	workspaceDir   string
+	queue          chan *chatRequest
+	openRouterClient *OpenRouterClient
 }
 
 // ChatMessage represents a message in the conversation
@@ -82,33 +80,17 @@ type ChatResult struct {
 	Model   string
 }
 
-// ClaudeStreamEvent represents an event from Claude CLI's stream-json output
-type ClaudeStreamEvent struct {
-	Type    string `json:"type"`
-	Message string `json:"message,omitempty"`
-	// For result events
-	Subtype      string  `json:"subtype,omitempty"`
-	Result       string  `json:"result,omitempty"`
-	DurationMS   float64 `json:"duration_ms,omitempty"`
-	DurationAPI  float64 `json:"duration_api_ms,omitempty"`
-	IsError      bool    `json:"is_error,omitempty"`
-	SessionID    string  `json:"session_id,omitempty"`
-	TotalCost    float64 `json:"total_cost,omitempty"`
-	InputTokens  int     `json:"input_tokens,omitempty"`
-	OutputTokens int     `json:"output_tokens,omitempty"`
-}
-
-// NewAIClient creates a new AI client using Claude CLI
+// NewAIClient creates a new AI client using OpenRouter API
 func NewAIClient(apiKey string, models []string) *AIClient {
-	// apiKey and models are ignored - Claude CLI uses its own config
 	workspaceDir := os.Getenv("MINERVA_WORKSPACE")
 	if workspaceDir == "" {
 		workspaceDir = "./workspace"
 	}
 
 	client := &AIClient{
-		workspaceDir: workspaceDir,
-		queue:        make(chan *chatRequest, 100), // Buffer up to 100 requests
+		workspaceDir:     workspaceDir,
+		queue:            make(chan *chatRequest, 100), // Buffer up to 100 requests
+		openRouterClient: NewOpenRouterClient(),
 	}
 
 	// Start the queue processor
@@ -122,14 +104,12 @@ func (c *AIClient) processQueue() {
 	for req := range c.queue {
 		log.Printf("[AI] Processing queued request (%d in queue)", len(c.queue))
 
-		// Build the prompt
-		prompt := c.buildPrompt(req.messages, req.systemPrompt)
-
-		// Execute claude CLI
-		result, err := c.executeClaude(prompt)
+		// Call OpenRouter API
+		result, err := c.openRouterClient.Chat(req.messages, req.systemPrompt)
 
 		// Send response back
 		if err != nil {
+			log.Printf("[AI] OpenRouter error: %v", err)
 			req.resultChan <- &chatResponse{err: err}
 		} else {
 			req.resultChan <- &chatResponse{
@@ -138,7 +118,7 @@ func (c *AIClient) processQueue() {
 						Role:    "assistant",
 						Content: result,
 					},
-					Model: "claude-cli",
+					Model: c.openRouterClient.model,
 				},
 			}
 		}
@@ -165,17 +145,6 @@ func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Too
 	return resp.result, resp.err
 }
 
-// buildPrompt constructs the prompt from messages
-// With --continue, Claude maintains its own context, so we only send the last message
-func (c *AIClient) buildPrompt(messages []ChatMessage, systemPrompt string) string {
-	// Only send the last user message - Claude's --continue handles conversation context
-	if len(messages) > 0 {
-		lastMsg := messages[len(messages)-1]
-		return extractContent(lastMsg.Content)
-	}
-	return ""
-}
-
 // extractContent gets the text content from a ChatMessage content field
 func extractContent(content interface{}) string {
 	switch v := content.(type) {
@@ -197,97 +166,4 @@ func extractContent(content interface{}) string {
 	default:
 		return fmt.Sprintf("%v", content)
 	}
-}
-
-// executeClaude runs the claude CLI and returns the result
-func (c *AIClient) executeClaude(prompt string) (string, error) {
-	// Ensure workspace directory exists
-	if err := os.MkdirAll(c.workspaceDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create workspace directory: %w", err)
-	}
-
-	args := []string{
-		"-p",
-		"--continue",
-		"--dangerously-skip-permissions",
-		"--model", "opus",
-		"--output-format", "stream-json",
-		"--verbose",
-		prompt,
-	}
-
-	log.Printf("[AI] Executing claude CLI in %s", c.workspaceDir)
-
-	cmd := exec.Command("claude", args...)
-	cmd.Dir = c.workspaceDir
-
-	// Get stdout pipe for streaming output
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("failed to get stdout pipe: %w", err)
-	}
-
-	// Capture stderr for debugging
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return "", fmt.Errorf("failed to get stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start claude CLI: %w", err)
-	}
-
-	// Read stderr in background
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			log.Printf("[Claude stderr] %s", scanner.Text())
-		}
-	}()
-
-	// Parse stream-json output
-	var result string
-	scanner := bufio.NewScanner(stdout)
-	// Increase buffer size for large outputs
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024) // 1MB max
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var event ClaudeStreamEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			log.Printf("[AI] Failed to parse event: %s", line)
-			continue
-		}
-
-		// Look for the result event
-		if event.Type == "result" {
-			result = event.Result
-			log.Printf("[AI] Got result (cost: $%.4f, tokens: %d in / %d out)",
-				event.TotalCost, event.InputTokens, event.OutputTokens)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Printf("[AI] Scanner error: %v", err)
-	}
-
-	if err := cmd.Wait(); err != nil {
-		// If we got a result, don't fail even if exit code is non-zero
-		if result != "" {
-			log.Printf("[AI] Claude exited with error but got result: %v", err)
-		} else {
-			return "", fmt.Errorf("claude CLI failed: %w", err)
-		}
-	}
-
-	if result == "" {
-		return "", fmt.Errorf("no result received from claude CLI")
-	}
-
-	return result, nil
 }

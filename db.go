@@ -394,7 +394,7 @@ func (db *DB) GetPendingReminders() ([]Reminder, error) {
 		SELECT id, user_id, message, remind_at, target, COALESCE(status, 'pending'), created_at
 		FROM reminders
 		WHERE (status = 'pending' OR (status IS NULL AND sent = FALSE)) AND remind_at <= ?
-	`, time.Now())
+	`, time.Now().Format(time.RFC3339))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query pending reminders: %w", err)
 	}
@@ -404,9 +404,12 @@ func (db *DB) GetPendingReminders() ([]Reminder, error) {
 	for rows.Next() {
 		var r Reminder
 		var target sql.NullString
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &r.RemindAt, &target, &r.Status, &r.CreatedAt); err != nil {
+		var remindAtStr, createdAtStr string
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &remindAtStr, &target, &r.Status, &createdAtStr); err != nil {
 			return nil, fmt.Errorf("failed to scan reminder: %w", err)
 		}
+		r.RemindAt, _ = time.Parse(time.RFC3339, remindAtStr)
+		r.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
 		r.Target = "user"
 		if target.Valid {
 			r.Target = target.String
@@ -452,9 +455,12 @@ func (db *DB) GetUserReminders(userID int64) ([]Reminder, error) {
 	for rows.Next() {
 		var r Reminder
 		var target sql.NullString
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &r.RemindAt, &target, &r.Status, &r.CreatedAt); err != nil {
+		var remindAtStr, createdAtStr string
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &remindAtStr, &target, &r.Status, &createdAtStr); err != nil {
 			return nil, fmt.Errorf("failed to scan reminder: %w", err)
 		}
+		r.RemindAt, _ = time.Parse(time.RFC3339, remindAtStr)
+		r.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
 		r.Target = "user"
 		if target.Valid {
 			r.Target = target.String

@@ -20,13 +20,22 @@ import (
 
 var db *DB
 
-const lockFile = "/tmp/minerva.lock"
-
 var lockFd *os.File
+
+func getLockFilePath() string {
+	if path := os.Getenv("MINERVA_LOCK_FILE"); path != "" {
+		return path
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return home + "/.minerva.lock"
+	}
+	return "/tmp/minerva.lock"
+}
 
 // acquireLock uses flock to ensure only one instance of minerva runs at a time.
 // If the lock file contains a PID of a dead process, it reclaims the lock.
 func acquireLock() error {
+	lockFile := getLockFilePath()
 	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("cannot open lock file %s: %w", lockFile, err)
@@ -60,7 +69,7 @@ func releaseLock() {
 	if lockFd != nil {
 		syscall.Flock(int(lockFd.Fd()), syscall.LOCK_UN)
 		lockFd.Close()
-		os.Remove(lockFile)
+		os.Remove(getLockFilePath())
 	}
 }
 
@@ -582,7 +591,11 @@ func runBot() {
 	log.Println("Configuration loaded")
 	log.Printf("  Database: %s", config.DatabasePath)
 	log.Printf("  Max context: %d messages", config.MaxContextMessages)
-	log.Println("  AI: Claude Code (local)")
+	model := os.Getenv("OPENROUTER_MODEL")
+	if model == "" {
+		model = "anthropic/claude-sonnet-4"
+	}
+	log.Printf("  AI: OpenRouter (%s)", model)
 
 	// Initialize database
 	db, err = InitDB(config.DatabasePath)
@@ -700,6 +713,16 @@ func runBot() {
 				log.Printf("Webhook server error: %v", err)
 			}
 		}()
+	}
+
+	// Start relay client if configured (encrypted E2E)
+	relayURL := os.Getenv("RELAY_URL")
+	relayKey := os.Getenv("RELAY_KEY")
+	if relayURL != "" && relayKey != "" {
+		relayClient := NewRelayClient(relayURL, relayKey, config.WebhookPort)
+		relayClient.Start()
+		log.Printf("Relay client connected to %s (encrypted)", relayURL)
+		defer relayClient.Stop()
 	}
 
 	// Start bot
