@@ -22,9 +22,9 @@ var db *DB
 
 var lockFd *os.File
 
-func getLockFilePath() string {
-	if path := os.Getenv("MINERVA_LOCK_FILE"); path != "" {
-		return path
+func getLockFile() string {
+	if tmpDir := os.Getenv("TMPDIR"); tmpDir != "" {
+		return tmpDir + "/minerva.lock"
 	}
 	if home := os.Getenv("HOME"); home != "" {
 		return home + "/.minerva.lock"
@@ -35,10 +35,9 @@ func getLockFilePath() string {
 // acquireLock uses flock to ensure only one instance of minerva runs at a time.
 // If the lock file contains a PID of a dead process, it reclaims the lock.
 func acquireLock() error {
-	lockFile := getLockFilePath()
-	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0644)
+	f, err := os.OpenFile(getLockFile(), os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
-		return fmt.Errorf("cannot open lock file %s: %w", lockFile, err)
+		return fmt.Errorf("cannot open lock file %s: %w", getLockFile(), err)
 	}
 
 	// Try non-blocking exclusive lock
@@ -49,9 +48,9 @@ func acquireLock() error {
 		f.Close()
 		pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
 		if pid > 0 {
-			return fmt.Errorf("another instance is already running (PID %d, lock file: %s)", pid, lockFile)
+			return fmt.Errorf("another instance is already running (PID %d, lock file: %s)", pid, getLockFile())
 		}
-		return fmt.Errorf("another instance is already running (lock file: %s)", lockFile)
+		return fmt.Errorf("another instance is already running (lock file: %s)", getLockFile())
 	}
 
 	// Lock acquired — write our PID
@@ -69,7 +68,7 @@ func releaseLock() {
 	if lockFd != nil {
 		syscall.Flock(int(lockFd.Fd()), syscall.LOCK_UN)
 		lockFd.Close()
-		os.Remove(getLockFilePath())
+		os.Remove(getLockFile())
 	}
 }
 
@@ -591,11 +590,7 @@ func runBot() {
 	log.Println("Configuration loaded")
 	log.Printf("  Database: %s", config.DatabasePath)
 	log.Printf("  Max context: %d messages", config.MaxContextMessages)
-	model := os.Getenv("OPENROUTER_MODEL")
-	if model == "" {
-		model = "anthropic/claude-sonnet-4"
-	}
-	log.Printf("  AI: OpenRouter (%s)", model)
+	log.Println("  AI: Claude Code (local)")
 
 	// Initialize database
 	db, err = InitDB(config.DatabasePath)
@@ -715,7 +710,7 @@ func runBot() {
 		}()
 	}
 
-	// Start relay client if configured (encrypted E2E)
+	// Start relay client if configured
 	relayURL := os.Getenv("RELAY_URL")
 	relayKey := os.Getenv("RELAY_KEY")
 	if relayURL != "" && relayKey != "" {
