@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -16,6 +17,35 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// AgentConfig is loaded from ~/.minerva-agent.json
+type AgentConfig struct {
+	HomeDir  string   `json:"home_dir"`
+	Projects []string `json:"projects"`
+}
+
+func loadConfig() AgentConfig {
+	home, _ := os.UserHomeDir()
+	configPath := filepath.Join(home, ".minerva-agent.json")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return AgentConfig{HomeDir: home}
+	}
+
+	var cfg AgentConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		log.Printf("Warning: failed to parse %s: %v", configPath, err)
+		return AgentConfig{HomeDir: home}
+	}
+
+	if cfg.HomeDir == "" {
+		cfg.HomeDir = home
+	}
+
+	log.Printf("Loaded config from %s (homeDir=%s, projects=%d)", configPath, cfg.HomeDir, len(cfg.Projects))
+	return cfg
+}
 
 // Message types
 const (
@@ -51,13 +81,14 @@ type AgentMessage struct {
 }
 
 type Agent struct {
-	name     string
-	relayURL string
-	password string
-	homeDir  string
-	conn     *websocket.Conn
-	mu       sync.Mutex
-	stopCh   chan struct{}
+	name       string
+	relayURL   string
+	password   string
+	homeDir    string
+	configProj []string // explicit project list from config
+	conn       *websocket.Conn
+	mu         sync.Mutex
+	stopCh     chan struct{}
 }
 
 func main() {
@@ -75,14 +106,15 @@ func main() {
 		log.Fatal("Relay URL required: use -relay or MINERVA_RELAY_URL env var")
 	}
 
-	homeDir, _ := os.UserHomeDir()
+	cfg := loadConfig()
 
 	agent := &Agent{
-		name:     *name,
-		relayURL: *relayURL,
-		password: *password,
-		homeDir:  homeDir,
-		stopCh:   make(chan struct{}),
+		name:       *name,
+		relayURL:   *relayURL,
+		password:   *password,
+		homeDir:    cfg.HomeDir,
+		configProj: cfg.Projects,
+		stopCh:     make(chan struct{}),
 	}
 
 	// Handle graceful shutdown
@@ -150,6 +182,12 @@ func (a *Agent) connect() error {
 }
 
 func (a *Agent) listProjects() []string {
+	// If config specifies explicit projects, use those
+	if len(a.configProj) > 0 {
+		return a.configProj
+	}
+
+	// Otherwise auto-detect from homeDir
 	var projects []string
 	entries, err := os.ReadDir(a.homeDir)
 	if err != nil {
@@ -160,10 +198,9 @@ func (a *Agent) listProjects() []string {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		// Check if it's a git repo or has common project indicators
 		path := filepath.Join(a.homeDir, e.Name())
 		if isProject(path) {
-			projects = append(projects, e.Name())
+			projects = append(projects, path)
 		}
 	}
 	return projects

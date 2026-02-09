@@ -210,7 +210,7 @@ func (w *WebhookServer) handleAgentList(rw http.ResponseWriter, r *http.Request)
 
 	for _, agent := range agents {
 		name, _ := agent["name"].(string)
-		workDir, _ := agent["workDir"].(string)
+		workDir, _ := agent["cwd"].(string)
 		if name == "" {
 			continue
 		}
