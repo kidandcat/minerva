@@ -24,6 +24,10 @@ type Config struct {
 	TwilioPhoneNumber    string // Twilio phone number for outbound calls
 	AgentPassword        string // Password for agent authentication
 	GoogleAPIKey         string // Google API Key for Gemini Live voice
+	BaseURL              string // Public URL for webhooks (e.g., https://example.com)
+	FromEmail            string // Email sender address (e.g., Minerva <minerva@example.com>)
+	OwnerName            string // Name of the assistant owner (used in voice prompts)
+	DefaultCountryCode   string // Default country code for phone numbers (e.g., +34)
 }
 
 // LoadConfig loads configuration from environment variables
@@ -44,6 +48,10 @@ func LoadConfig() (*Config, error) {
 		TwilioPhoneNumber:  os.Getenv("TWILIO_PHONE_NUMBER"),
 		AgentPassword:      os.Getenv("AGENT_PASSWORD"),
 		GoogleAPIKey:       os.Getenv("GOOGLE_API_KEY"),
+		BaseURL:            os.Getenv("BASE_URL"),
+		FromEmail:          getEnvOrDefault("FROM_EMAIL", "Minerva <minerva@example.com>"),
+		OwnerName:          getEnvOrDefault("OWNER_NAME", "the owner"),
+		DefaultCountryCode: getEnvOrDefault("DEFAULT_COUNTRY_CODE", "+1"),
 	}
 
 	return config, nil
@@ -67,6 +75,10 @@ func LoadConfigForCLI() (*Config, error) {
 		TwilioPhoneNumber:   os.Getenv("TWILIO_PHONE_NUMBER"),
 		AgentPassword:       os.Getenv("AGENT_PASSWORD"),
 		GoogleAPIKey:        os.Getenv("GOOGLE_API_KEY"),
+		BaseURL:             os.Getenv("BASE_URL"),
+		FromEmail:           getEnvOrDefault("FROM_EMAIL", "Minerva <minerva@example.com>"),
+		OwnerName:           getEnvOrDefault("OWNER_NAME", "the owner"),
+		DefaultCountryCode:  getEnvOrDefault("DEFAULT_COUNTRY_CODE", "+1"),
 	}
 
 	return config, nil

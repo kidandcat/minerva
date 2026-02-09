@@ -9,9 +9,14 @@ import (
 )
 
 var resendAPIKey string
+var fromEmail = "Minerva <minerva@example.com>"
 
 func SetResendAPIKey(key string) {
 	resendAPIKey = key
+}
+
+func SetFromEmail(email string) {
+	fromEmail = email
 }
 
 type SendEmailArgs struct {
@@ -40,7 +45,7 @@ func SendEmail(arguments string) (string, error) {
 	}
 
 	reqBody := map[string]any{
-		"from":    "Minerva <minerva@jairo.cloud>",
+		"from":    fromEmail,
 		"to":      []string{args.To},
 		"subject": args.Subject,
 		"text":    args.Body,

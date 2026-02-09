@@ -264,18 +264,21 @@ func (d *PhoneDevice) handleCallActive() {
 	}
 
 	// Connect to Gemini Live
+	ownerName := "the owner"
+	if d.bridge.bot.config != nil {
+		ownerName = d.bridge.bot.config.OwnerName
+	}
 	var prompt string
 	if session.direction == "incoming" {
-		prompt = systemPromptVoice
+		prompt = buildIncomingVoicePrompt(ownerName)
 	} else {
-		// For outgoing calls, we might have a purpose stored
-		prompt = fmt.Sprintf(`You are Minerva, Jairo's AI assistant. You are making an outbound call.
+		prompt = fmt.Sprintf(`You are Minerva, %s's AI assistant. You are making an outbound call.
 
 Key behaviors:
 - Speak in Spanish
 - Be natural and conversational
-- Introduce yourself: "Hola, llamo de parte de Jairo"
-- Be warm and professional`)
+- Introduce yourself briefly
+- Be warm and professional`, ownerName)
 	}
 
 	if err := d.connectGemini(session, prompt); err != nil {

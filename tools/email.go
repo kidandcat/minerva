@@ -32,10 +32,14 @@ type ResendError struct {
 }
 
 var resendAPIKey string
-var fromEmail = "Minerva <minerva@jairo.cloud>"
+var fromEmail = "Minerva <minerva@example.com>"
 
 func SetResendAPIKey(key string) {
 	resendAPIKey = key
+}
+
+func SetFromEmail(email string) {
+	fromEmail = email
 }
 
 func SendEmail(arguments string) (string, error) {

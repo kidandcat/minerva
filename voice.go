@@ -16,44 +16,43 @@ import (
 )
 
 const (
-	geminiWSURL       = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-	geminiModel       = "models/gemini-2.5-flash-native-audio-latest"
-	geminiVoice       = "Zephyr"
-	voiceCallTimeout  = 5 * time.Minute
-	systemPromptVoice = `You are Minerva, Jairo's personal AI assistant. You are answering an incoming phone call.
+	geminiWSURL      = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+	geminiModel      = "models/gemini-2.5-flash-native-audio-latest"
+	geminiVoice      = "Zephyr"
+	voiceCallTimeout = 5 * time.Minute
+)
 
-ABOUT JAIRO (your owner):
-- Jairo Caro - Software architect with 10+ years of experience
-- Lives in Spain
-- Works on various software projects
-- You are his AI assistant handling his calls when he's not available
+func buildIncomingVoicePrompt(ownerName string) string {
+	return fmt.Sprintf(`You are Minerva, %s's personal AI assistant. You are answering an incoming phone call.
 
 YOUR ROLE ON THIS CALL:
-- Answer professionally and warmly: "Hola, soy Minerva, la asistente de Jairo. ¿En qué puedo ayudarle?"
+- Answer professionally and warmly
 - Take messages if someone wants to leave one
 - Answer basic questions if you can help
-- For anything important or urgent, assure them you'll notify Jairo immediately
-- If they want to schedule something, take their details and say Jairo will confirm
-- Never give out personal information about Jairo (address, schedule, etc.)
+- For anything important or urgent, assure them you'll notify %s immediately
+- If they want to schedule something, take their details and say %s will confirm
+- Never give out personal information (address, schedule, etc.)
 
 KEY BEHAVIORS:
 - Speak in Spanish by default, switch to English if the caller speaks English
 - Be natural and conversational - this is a real phone call
 - Keep responses short and clear
 - Be warm, helpful, and professional
-- If unsure about something, say you'll check with Jairo and get back to them`
-)
+- If unsure about something, say you'll check with %s and get back to them`, ownerName, ownerName, ownerName, ownerName)
+}
 
 // VoiceManager handles voice calls via Twilio Media Streams + Gemini Live API
 type VoiceManager struct {
-	bot            *Bot
-	apiKey         string
-	baseURL        string // Public URL (e.g., https://home.jairo.cloud)
-	twilioSID      string
-	twilioToken    string
-	twilioPhone    string
-	activeCalls    sync.Map
-	pendingCalls   sync.Map // callSID → system prompt override for outbound calls
+	bot                *Bot
+	apiKey             string
+	baseURL            string // Public URL for webhooks
+	twilioSID          string
+	twilioToken        string
+	twilioPhone        string
+	ownerName          string
+	defaultCountryCode string
+	activeCalls        sync.Map
+	pendingCalls       sync.Map // callSID → system prompt override for outbound calls
 }
 
 // voiceSession tracks an active voice call
@@ -167,14 +166,16 @@ type geminiServerMsg struct {
 	} `json:"serverContent,omitempty"`
 }
 
-func NewVoiceManager(bot *Bot, apiKey, baseURL, twilioSID, twilioToken, twilioPhone string) *VoiceManager {
+func NewVoiceManager(bot *Bot, apiKey, baseURL, twilioSID, twilioToken, twilioPhone, ownerName, defaultCountryCode string) *VoiceManager {
 	return &VoiceManager{
-		bot:         bot,
-		apiKey:      apiKey,
-		baseURL:     baseURL,
-		twilioSID:   twilioSID,
-		twilioToken: twilioToken,
-		twilioPhone: twilioPhone,
+		bot:                bot,
+		apiKey:             apiKey,
+		baseURL:            baseURL,
+		twilioSID:          twilioSID,
+		twilioToken:        twilioToken,
+		twilioPhone:        twilioPhone,
+		ownerName:          ownerName,
+		defaultCountryCode: defaultCountryCode,
 	}
 }
 
@@ -323,7 +324,7 @@ func (v *VoiceManager) connectGemini(session *voiceSession) error {
 	session.geminiConn = conn
 
 	// Build setup message
-	prompt := systemPromptVoice
+	prompt := buildIncomingVoicePrompt(v.ownerName)
 	if session.systemPrompt != "" {
 		prompt = session.systemPrompt
 	}
@@ -525,7 +526,7 @@ func (v *VoiceManager) MakeCall(to, purpose string) (string, error) {
 
 	// Normalize phone number
 	if !strings.HasPrefix(to, "+") {
-		to = "+34" + strings.TrimPrefix(to, "0")
+		to = v.defaultCountryCode + strings.TrimPrefix(to, "0")
 	}
 
 	// Build TwiML that points to our outbound endpoint
@@ -544,7 +545,7 @@ func (v *VoiceManager) MakeCall(to, purpose string) (string, error) {
 </Response>`, wsURL)
 
 	// Build outbound system prompt with purpose
-	outboundPrompt := fmt.Sprintf(`You are Minerva, a personal AI assistant for Jairo. You are making an outbound phone call on his behalf.
+	outboundPrompt := fmt.Sprintf(`You are Minerva, a personal AI assistant for %s. You are making an outbound phone call on their behalf.
 
 YOUR TASK FOR THIS CALL:
 %s
@@ -554,10 +555,10 @@ Key behaviors:
 - Be natural and conversational, like a real phone call
 - Keep responses concise - this is a phone call, not a chat
 - Be warm, professional, and polite
-- When the person answers, introduce yourself briefly: "Hola, llamo de parte de Jairo"
+- When the person answers, introduce yourself briefly
 - Then proceed with your task
 - If you accomplish the task or get the information needed, thank them and end the call politely
-- If you encounter issues, explain you'll let Jairo know and end the call`, purpose)
+- If you encounter issues, explain you'll let %s know and end the call`, v.ownerName, purpose, v.ownerName)
 
 	// Make the call via Twilio API
 	callURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Calls.json", v.twilioSID)
@@ -659,7 +660,7 @@ func (v *VoiceManager) generateSummary(session *voiceSession, duration time.Dura
 	summaryPrompt := []ChatMessage{
 		{
 			Role:    "system",
-			Content: "Eres un asistente que resume llamadas telefónicas. Genera un resumen conciso en español. Si Minerva prometió que Jairo devolvería la llamada, indica '⚠️ CALLBACK NECESARIO' al principio.",
+			Content: "Eres un asistente que resume llamadas telefónicas. Genera un resumen conciso en español. Si Minerva prometió devolver la llamada, indica '⚠️ CALLBACK NECESARIO' al principio.",
 		},
 		{
 			Role:    "user",

@@ -316,7 +316,7 @@ func (c *mobileAIClient) chat(userMessage, systemPrompt string) (string, error) 
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("HTTP-Referer", "https://home.jairo.cloud")
+	req.Header.Set("HTTP-Referer", "https://github.com/kidandcat/minerva")
 	req.Header.Set("X-Title", "Minerva Mobile")
 
 	resp, err := c.httpClient.Do(req)

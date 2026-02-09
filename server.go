@@ -52,6 +52,7 @@ func StartServer(config *Config) error {
 	// Initialize email
 	if config.ResendAPIKey != "" {
 		tools.SetResendAPIKey(config.ResendAPIKey)
+		tools.SetFromEmail(config.FromEmail)
 		log.Println("Email (Resend) configured")
 	}
 
@@ -121,8 +122,7 @@ func StartServer(config *Config) error {
 
 	// Initialize Twilio
 	if config.TwilioAccountSID != "" && config.TwilioAuthToken != "" {
-		baseURL := "https://home.jairo.cloud"
-		state.twilioManager = NewTwilioCallManager(bot, config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber, baseURL)
+		state.twilioManager = NewTwilioCallManager(bot, config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber, config.BaseURL)
 		bot.twilioManager = state.twilioManager
 		log.Println("Twilio configured")
 
@@ -149,8 +149,9 @@ func StartServer(config *Config) error {
 
 	// Initialize Voice AI (Gemini Live)
 	if config.GoogleAPIKey != "" {
-		state.voiceManager = NewVoiceManager(bot, config.GoogleAPIKey, "https://home.jairo.cloud",
-			config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber)
+		state.voiceManager = NewVoiceManager(bot, config.GoogleAPIKey, config.BaseURL,
+			config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber,
+			config.OwnerName, config.DefaultCountryCode)
 		log.Println("Voice AI (Gemini Live) configured")
 	}
 

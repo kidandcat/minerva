@@ -16,12 +16,14 @@ import (
 
 // TwilioCallManager handles voice calls via Twilio ConversationRelay
 type TwilioCallManager struct {
-	bot         *Bot
-	accountSID  string
-	authToken   string
-	phoneNumber string
-	baseURL     string // Public URL for webhooks (e.g., https://home.jairo.cloud)
-	activeCalls sync.Map
+	bot                *Bot
+	accountSID         string
+	authToken          string
+	phoneNumber        string
+	baseURL            string // Public URL for webhooks
+	ownerName          string
+	defaultCountryCode string
+	activeCalls        sync.Map
 }
 
 // ActiveCall represents an ongoing call
@@ -49,12 +51,20 @@ type ConversationRelayMessage struct {
 
 // NewTwilioCallManager creates a new call manager
 func NewTwilioCallManager(bot *Bot, accountSID, authToken, phoneNumber, baseURL string) *TwilioCallManager {
+	ownerName := "the owner"
+	countryCode := "+1"
+	if bot.config != nil {
+		ownerName = bot.config.OwnerName
+		countryCode = bot.config.DefaultCountryCode
+	}
 	return &TwilioCallManager{
-		bot:         bot,
-		accountSID:  accountSID,
-		authToken:   authToken,
-		phoneNumber: phoneNumber,
-		baseURL:     baseURL,
+		bot:                bot,
+		accountSID:         accountSID,
+		authToken:          authToken,
+		phoneNumber:        phoneNumber,
+		baseURL:            baseURL,
+		ownerName:          ownerName,
+		defaultCountryCode: countryCode,
 	}
 }
 
@@ -77,7 +87,7 @@ func (t *TwilioCallManager) HandleIncomingCall(w http.ResponseWriter, r *http.Re
 		Messages: []ChatMessage{
 			{
 				Role:    "system",
-				Content: fmt.Sprintf("You are Minerva, Jairo's personal AI assistant. You are answering an incoming phone call from %s. Jairo is not available right now.\n\nINSTRUCTIONS:\n- Answer politely in Spanish\n- Find out who is calling and what they need\n- Take a message or provide helpful information\n- Be concise and natural\n- If it seems important or urgent, or they specifically want to talk to Jairo, tell them: \"Le diré a Jairo que le llame en cuanto pueda\"\n- If they want to leave a message, assure them Jairo will be notified\n- End the call politely when appropriate", from),
+				Content: fmt.Sprintf("You are Minerva, %s's personal AI assistant. You are answering an incoming phone call from %s. %s is not available right now.\n\nINSTRUCTIONS:\n- Answer politely in Spanish\n- Find out who is calling and what they need\n- Take a message or provide helpful information\n- Be concise and natural\n- If it seems important or urgent, tell them you'll pass the message along\n- If they want to leave a message, assure them they will be notified\n- End the call politely when appropriate", t.ownerName, from, t.ownerName),
 			},
 		},
 	}
@@ -88,7 +98,7 @@ func (t *TwilioCallManager) HandleIncomingCall(w http.ResponseWriter, r *http.Re
 	twiml := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <ConversationRelay url="%s" voice="es-ES-Standard-A" language="es-ES" transcriptionProvider="google" ttsProvider="google" welcomeGreeting="Hola, soy Minerva, la asistente de Jairo. ¿En qué puedo ayudarle?" interruptible="true">
+        <ConversationRelay url="%s" voice="es-ES-Standard-A" language="es-ES" transcriptionProvider="google" ttsProvider="google" welcomeGreeting="Hola, soy Minerva. ¿En qué puedo ayudarle?" interruptible="true">
             <Parameter name="call_sid" value="%s" />
             <Parameter name="direction" value="inbound" />
             <Parameter name="from" value="%s" />
@@ -108,8 +118,7 @@ func (t *TwilioCallManager) InitiateCall(to, purpose string, userID, convID int6
 
 	// Normalize phone number
 	if !strings.HasPrefix(to, "+") {
-		// Assume Spanish number if no prefix
-		to = "+34" + strings.TrimPrefix(to, "0")
+		to = t.defaultCountryCode + strings.TrimPrefix(to, "0")
 	}
 
 	// Create TwiML for ConversationRelay
@@ -117,7 +126,7 @@ func (t *TwilioCallManager) InitiateCall(to, purpose string, userID, convID int6
 	twiml := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <ConversationRelay url="%s" voice="es-ES-Standard-A" language="es-ES" transcriptionProvider="google" ttsProvider="google" welcomeGreeting="Hola, llamo de parte de Jairo." interruptible="true" interruptByDtmf="true" dtmfDetection="true">
+        <ConversationRelay url="%s" voice="es-ES-Standard-A" language="es-ES" transcriptionProvider="google" ttsProvider="google" welcomeGreeting="Hola, llamo de parte de Minerva." interruptible="true" interruptByDtmf="true" dtmfDetection="true">
             <Parameter name="purpose" value="%s" />
             <Parameter name="user_id" value="%d" />
             <Parameter name="conv_id" value="%d" />
@@ -174,7 +183,7 @@ func (t *TwilioCallManager) InitiateCall(to, purpose string, userID, convID int6
 		Messages: []ChatMessage{
 			{
 				Role:    "system",
-				Content: fmt.Sprintf("You are Minerva, an AI assistant making a phone call on behalf of Jairo. The purpose of this call is: %s\n\nIMPORTANT INSTRUCTIONS:\n- Speak naturally in Spanish\n- Be polite and professional\n- Stay focused on the purpose of the call\n- If you accomplish the goal or need to end the call, say goodbye and I will hang up\n- Keep responses concise for natural conversation", purpose),
+				Content: fmt.Sprintf("You are Minerva, an AI assistant making a phone call on behalf of %s. The purpose of this call is: %s\n\nIMPORTANT INSTRUCTIONS:\n- Speak naturally in Spanish\n- Be polite and professional\n- Stay focused on the purpose of the call\n- If you accomplish the goal or need to end the call, say goodbye and I will hang up\n- Keep responses concise for natural conversation", t.ownerName, purpose),
 			},
 		},
 	}
@@ -330,7 +339,7 @@ func (t *TwilioCallManager) generateCallSummary(call *ActiveCall) {
 	summaryPrompt := []ChatMessage{
 		{
 			Role:    "system",
-			Content: "Eres un asistente que resume llamadas telefónicas. Genera un resumen conciso en español. Si Minerva prometió que Jairo devolvería la llamada, DEBES indicarlo claramente con '⚠️ CALLBACK NECESARIO' al principio.",
+			Content: "Eres un asistente que resume llamadas telefónicas. Genera un resumen conciso en español. Si Minerva prometió devolver la llamada, DEBES indicarlo claramente con '⚠️ CALLBACK NECESARIO' al principio.",
 		},
 		{
 			Role:    "user",
