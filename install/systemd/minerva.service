@@ -1,0 +1,22 @@
+[Unit]
+Description=Minerva Personal AI Assistant
+After=network.target
+
+[Service]
+Type=simple
+User=minerva
+Group=minerva
+WorkingDirectory=/opt/minerva
+EnvironmentFile=/opt/minerva/.env
+ExecStart=/opt/minerva/minerva
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/minerva
+
+[Install]
+WantedBy=multi-user.target
