@@ -30,16 +30,57 @@ Minerva is a single Go binary that acts as a personal AI hub:
 
 ## Features
 
+### Telegram Bot
 - **AI Chat** — Talk to Claude via Telegram with persistent conversation history
-- **Reminders** — Schedule reminders with natural language; AI decides when to reschedule
-- **Memory** — Persistent memory across conversations
-- **Remote Agents** — Delegate coding tasks to Claude Code instances on any machine
-- **Email** — Send and receive emails via [Resend](https://resend.com)
-- **Voice Calls** — Make and receive phone calls with real-time AI voice (Gemini Live)
-- **Android Phone Bridge** — Use a real phone number via an Android device
-- **Background Tasks** — Long-running tasks with progress tracking
-- **Code Execution** — Run JavaScript snippets in a sandbox (Goja)
-- **Encrypted Relay** — Optional relay for agents behind NAT/firewalls
+- **Photos & Documents** — Send images and files for analysis (auto-downloaded and passed to Claude)
+- **Conversation Management** — Multiple conversations with `/clear`, full message history
+- **Multi-user Support** — Admin approval system for additional users with inline approve/reject buttons
+- **Bot Commands** — `/reminders`, `/clear`, `/token`, and more via Telegram's command menu
+
+### AI & Memory
+- **Claude CLI Brain** — Uses Claude Code (`claude -p`) as the AI backend with session continuity (`--continue`)
+- **Persistent Memory** — Store and recall information about the user across conversations (2000 char, AI-managed)
+- **System Prompts** — Customizable AI behavior per user via `/system`
+- **Context Window** — Configurable number of recent messages injected as conversation context
+
+### Reminders
+- **Persistent Reminders** — Schedule reminders with natural language or ISO8601 timestamps
+- **Smart Rescheduling** — AI autonomously decides whether to reschedule recurring/follow-up reminders
+- **Status Lifecycle** — `pending` → `fired` → `done`; only the user can dismiss
+
+### Voice Calls (Twilio + Gemini Live)
+- **Outbound Calls** — AI makes phone calls on your behalf (reservations, inquiries, etc.)
+- **Inbound Calls** — AI answers your phone and takes messages
+- **Real-time Voice AI** — Gemini Live (`gemini-2.5-flash-native-audio`) for natural conversation
+- **Auto Summaries** — Call summaries sent to Telegram after each call
+- **Android Phone Bridge** — Route calls through a real Android phone number via companion app
+
+### Email (Resend)
+- **Send Emails** — AI sends emails on your behalf via [Resend](https://resend.com)
+- **Inbound Webhooks** — Receive and process incoming emails (Svix-signed webhooks)
+
+### Remote Agents
+- **Claude Code Agents** — Connect Claude Code instances from any machine via WebSocket
+- **Project Discovery** — Agents report their available projects for smart task routing
+- **Async Task Execution** — Dispatch coding tasks and get results via Telegram
+- **Encrypted Relay** — Optional relay server for agents behind NAT/firewalls
+
+### Background Tasks
+- **Long-running Tasks** — Claude Code executes complex tasks autonomously in the background
+- **Progress Tracking** — Real-time progress via `PROGRESS.md`, check with `/tasks`
+
+### Tools System
+The AI brain has access to these tools, callable during conversations:
+- `create_reminder` / `list_reminders` / `delete_reminder` / `reschedule_reminder`
+- `update_memory` — Persistent user memory management
+- `send_email` — Send emails via Resend
+- `make_call` — Initiate phone calls via Twilio
+- `run_claude` / `list_claude_projects` — Delegate tasks to remote agents
+- `create_task` / `get_task_progress` — Background task management
+- `run_code` — Execute JavaScript in a sandboxed environment (Goja)
+
+### CLI
+Full CLI for direct interaction and scripting — reminders, memory, agents, email, calls, and more. See [CLI Commands](#cli-commands) below.
 
 ## Requirements
 
