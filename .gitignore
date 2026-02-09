@@ -10,9 +10,12 @@ agent/minerva-linux
 mcp/minerva-linux
 mcp/minerva-mcp-linux
 
-# Environment
+# Environment & secrets
 .env
 .env.local
+.env.production
+*.pem
+*.key
 
 # Database
 *.db
@@ -32,3 +35,10 @@ Thumbs.db
 # Build artifacts
 minerva-check
 android/
+android-app/bridge/.gradle/
+android-app/bridge/build/
+android-app/bridge/app/build/
+
+# Temporary files
+*.log
+*.tmp
