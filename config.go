@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -67,6 +70,45 @@ func LoadConfigForCLI() (*Config, error) {
 	}
 
 	return config, nil
+}
+
+// updateEnvFile updates or adds a key=value pair in the .env file
+func updateEnvFile(key, value string) error {
+	envFile := ".env"
+	lines, err := readLines(envFile)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	found := false
+	prefix := key + "="
+	for i, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			lines[i] = fmt.Sprintf("%s=%s", key, value)
+			found = true
+			break
+		}
+	}
+	if !found {
+		lines = append(lines, fmt.Sprintf("%s=%s", key, value))
+	}
+
+	return os.WriteFile(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0600)
+}
+
+func readLines(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	return lines, scanner.Err()
 }
 
 func getEnvOrDefault(key, defaultValue string) string {

@@ -105,26 +105,30 @@ When the task completes, a Telegram notification will be sent with the output.
 
 ### Phone Calls
 
-You can make phone calls on behalf of Jairo. Use this for tasks like making reservations, asking for information, etc.
+You can make phone calls on behalf of Jairo using the Android phone's real SIM card. The call is placed via the phone bridge and Gemini Live AI conducts the conversation.
 
 ```bash
 # Make a call with a specific purpose/task
-minerva call <phone_number> "purpose/instructions for the call"
+$HOME/minerva call <phone_number> "purpose/instructions for the call"
 ```
 
 Example:
 ```bash
 # Call a restaurant to make a reservation
-minerva call +34912345678 "Llama al restaurante y reserva mesa para 2 personas mañana a las 21:00 a nombre de Jairo"
+$HOME/minerva call +34912345678 "Llama al restaurante y reserva mesa para 2 personas mañana a las 21:00 a nombre de Jairo"
 
 # Call a hair salon to book an appointment
-minerva call 612345678 "Llama a esta peluquería y pide cita para corte de pelo para el viernes por la tarde"
+$HOME/minerva call 612345678 "Llama a esta peluquería y pide cita para corte de pelo para el viernes por la tarde"
 
 # Call to ask for information
-minerva call +34911234567 "Pregunta cuál es el horario de atención al público y si necesito cita previa"
+$HOME/minerva call +34911234567 "Pregunta cuál es el horario de atención al público y si necesito cita previa"
 ```
 
-The call is handled by Gemini Live - you (Minerva) will conduct the conversation and accomplish the task. When the call ends, a summary will be sent to Jairo via Telegram.
+How it works:
+- The call is placed through the Android phone's SIM (real phone number)
+- Gemini Live AI conducts the conversation based on the purpose/instructions
+- When the call ends, a summary is automatically sent to Jairo via Telegram
+- Requires `GOOGLE_API_KEY` in the environment for Gemini Live
 
 ### Email
 
@@ -147,7 +151,7 @@ minerva email send someone@example.com --subject "Reunión mañana" --body "Hola
 3. **Communication**: Use `minerva send` to send messages back (only if needed outside normal response)
 4. **Agents**: When user asks about code/projects, first check `minerva agent list` to see available projects, then use `minerva agent run` to execute tasks
 5. **Context**: Use `minerva context` if you need to see conversation history
-6. **Phone Calls**: When user asks you to call somewhere (make a reservation, ask for info, etc.), use `minerva call` with clear instructions. You will conduct the call via Gemini Live and report back.
+6. **Phone Calls**: When user asks you to call somewhere (make a reservation, ask for info, etc.), run `$HOME/$HOME/minerva call <number> "purpose"` directly via Bash. Do NOT delegate calls to agents — this is a local phone action, not a code task.
 7. **Email**: When user asks you to send an email, use `minerva email send` with the recipient, subject, and body.
 
 ## Role Separation

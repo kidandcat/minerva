@@ -49,15 +49,8 @@ func (b *Bot) Start() {
 	// Register bot commands menu
 	commands := tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "start", Description: "Mostrar bienvenida y ayuda"},
-		tgbotapi.BotCommand{Command: "new", Description: "Nueva conversación"},
-		tgbotapi.BotCommand{Command: "history", Description: "Ver conversaciones anteriores"},
 		tgbotapi.BotCommand{Command: "reminders", Description: "Ver recordatorios pendientes"},
-		tgbotapi.BotCommand{Command: "tasks", Description: "Ver tareas en background"},
-		tgbotapi.BotCommand{Command: "memory", Description: "Ver lo que recuerdo de ti"},
-		tgbotapi.BotCommand{Command: "system", Description: "Configurar system prompt"},
-		tgbotapi.BotCommand{Command: "cancel", Description: "Cancelar una tarea"},
-		tgbotapi.BotCommand{Command: "resume", Description: "Reanudar una tarea fallida"},
-		tgbotapi.BotCommand{Command: "status", Description: "Estado de una tarea"},
+		tgbotapi.BotCommand{Command: "token", Description: "Actualizar OAuth token de Claude"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
 		log.Printf("Failed to set bot commands: %v", err)
@@ -417,24 +410,10 @@ func (b *Bot) handleCommand(update tgbotapi.Update) error {
 	}
 
 	switch command {
-	case "new":
-		return b.handleNew(msg, user)
-	case "history":
-		return b.handleHistory(msg, user)
-	case "system":
-		return b.handleSystem(msg, args, user)
-	case "memory":
-		return b.handleMemory(msg, user)
 	case "reminders":
 		return b.handleReminders(msg, user)
-	case "tasks":
-		return b.handleTasks(msg, user)
-	case "cancel":
-		return b.handleCancelTask(msg, args)
-	case "resume":
-		return b.handleResumeTask(msg, args)
-	case "status":
-		return b.handleTaskStatus(msg, args)
+	case "token":
+		return b.handleToken(msg, args)
 	default:
 		return b.sendMessage(msg.Chat.ID, "Unknown command. Use /start for help.")
 	}
@@ -443,98 +422,33 @@ func (b *Bot) handleCommand(update tgbotapi.Update) error {
 func (b *Bot) handleStart(msg *tgbotapi.Message) error {
 	welcome := `*Minerva - Personal AI Assistant*
 
-I can help you with:
-• Having conversations (just send me a message)
-• Setting reminders
-• Remembering things about you
-• Running background tasks (web research, calls, etc.)
+Envíame un mensaje para chatear.
 
-*Commands:*
-/new - Start a new conversation
-/history - View past conversations
-/system <prompt> - Set custom AI behavior
-/memory - View what I remember about you
-/reminders - View pending reminders
-/tasks - View running tasks
-/status <id> - Check task status & progress
-/cancel <id> - Cancel a task
-/resume <id> - Resume a failed task
-
-Just send me a message to chat!`
+*Comandos:*
+/reminders - Ver recordatorios pendientes
+/token <token> - Actualizar OAuth token de Claude`
 
 	return b.sendMessage(msg.Chat.ID, welcome)
 }
 
-func (b *Bot) handleNew(msg *tgbotapi.Message, user *User) error {
-	_, err := b.db.CreateConversation(user.ID, "")
-	if err != nil {
-		return err
+func (b *Bot) handleToken(msg *tgbotapi.Message, args string) error {
+	if !b.isAdmin(msg.From.ID) {
+		return b.sendMessage(msg.Chat.ID, "Only the admin can update the token.")
 	}
 
-	return b.sendMessage(msg.Chat.ID, "New conversation started!")
-}
-
-func (b *Bot) handleHistory(msg *tgbotapi.Message, user *User) error {
-	conversations, err := b.db.GetUserConversations(user.ID, 10)
-	if err != nil {
-		return err
-	}
-
-	if len(conversations) == 0 {
-		return b.sendMessage(msg.Chat.ID, "No conversations yet. Send a message to start!")
-	}
-
-	var sb strings.Builder
-	sb.WriteString("*Recent conversations:*\n\n")
-
-	for i, conv := range conversations {
-		status := ""
-		if conv.Active {
-			status = " ✓"
-		}
-		sb.WriteString(fmt.Sprintf("%d. %s%s\n   _%s_\n\n",
-			i+1, conv.Title, status, conv.CreatedAt.Format("Jan 2, 15:04")))
-	}
-
-	return b.sendMessage(msg.Chat.ID, sb.String())
-}
-
-func (b *Bot) handleSystem(msg *tgbotapi.Message, args string, user *User) error {
 	if args == "" {
-		if user.SystemPrompt == "" {
-			return b.sendMessage(msg.Chat.ID, "No custom system prompt set.\n\nUse `/system <prompt>` to set one.")
-		}
-		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("*Current system prompt:*\n\n%s\n\nUse `/system clear` to remove it.", user.SystemPrompt))
+		return b.sendMessage(msg.Chat.ID, "Usage: /token <oauth_token>")
 	}
 
-	if strings.ToLower(args) == "clear" {
-		if err := b.db.UpdateUserSystemPrompt(user.ID, ""); err != nil {
-			return err
-		}
-		return b.sendMessage(msg.Chat.ID, "System prompt cleared.")
+	// Update in running process
+	os.Setenv("CLAUDE_CODE_OAUTH_TOKEN", args)
+
+	// Persist to .env file
+	if err := updateEnvFile("CLAUDE_CODE_OAUTH_TOKEN", args); err != nil {
+		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Token set in memory but failed to persist to .env: %v", err))
 	}
 
-	if err := b.db.UpdateUserSystemPrompt(user.ID, args); err != nil {
-		return err
-	}
-
-	return b.sendMessage(msg.Chat.ID, "System prompt updated!")
-}
-
-func (b *Bot) handleMemory(msg *tgbotapi.Message, user *User) error {
-	memory, err := b.db.GetUserMemory(user.ID)
-	if err != nil {
-		return err
-	}
-
-	if memory == "" {
-		return b.sendMessage(msg.Chat.ID, "No memory stored yet. Just chat with me and I'll remember important things!")
-	}
-
-	charCount := len(memory)
-	response := fmt.Sprintf("*What I remember about you:*\n\n%s\n\n_(%d/2000 characters)_", memory, charCount)
-
-	return b.sendMessage(msg.Chat.ID, response)
+	return b.sendMessage(msg.Chat.ID, "OAuth token updated.")
 }
 
 func (b *Bot) handleReminders(msg *tgbotapi.Message, user *User) error {
@@ -560,137 +474,6 @@ func (b *Bot) handleReminders(msg *tgbotapi.Message, user *User) error {
 	}
 
 	return b.sendMessage(msg.Chat.ID, sb.String())
-}
-
-func (b *Bot) handleTasks(msg *tgbotapi.Message, user *User) error {
-	tasks, err := b.db.GetUserTasks(user.ID)
-	if err != nil {
-		return err
-	}
-
-	if len(tasks) == 0 {
-		return b.sendMessage(msg.Chat.ID, "No tasks. Ask me to do something complex and I'll create a background task!")
-	}
-
-	var sb strings.Builder
-	sb.WriteString("*Tasks:*\n\n")
-
-	for _, t := range tasks {
-		statusEmoji := "🔄"
-		switch t.Status {
-		case "completed":
-			statusEmoji = "✅"
-		case "failed":
-			statusEmoji = "❌"
-		case "cancelled":
-			statusEmoji = "🚫"
-		}
-
-		desc := t.Description
-		if len(desc) > 50 {
-			desc = desc[:50] + "..."
-		}
-
-		sb.WriteString(fmt.Sprintf("%s `%s`\n   %s\n   _%s_\n\n",
-			statusEmoji, t.ID, desc, t.CreatedAt.Format("Jan 2, 15:04")))
-	}
-
-	sb.WriteString("Use /cancel <id> to cancel a running task")
-
-	return b.sendMessage(msg.Chat.ID, sb.String())
-}
-
-func (b *Bot) handleCancelTask(msg *tgbotapi.Message, args string) error {
-	if args == "" {
-		return b.sendMessage(msg.Chat.ID, "Usage: /cancel <task_id>")
-	}
-
-	if b.taskRunner == nil {
-		return b.sendMessage(msg.Chat.ID, "Task runner not configured")
-	}
-
-	if err := b.taskRunner.CancelTask(args); err != nil {
-		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Failed to cancel task: %v", err))
-	}
-
-	return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Task %s cancelled", args))
-}
-
-func (b *Bot) handleResumeTask(msg *tgbotapi.Message, args string) error {
-	if args == "" {
-		return b.sendMessage(msg.Chat.ID, "Usage: /resume <task_id>")
-	}
-
-	if b.taskRunner == nil {
-		return b.sendMessage(msg.Chat.ID, "Task runner not configured")
-	}
-
-	if err := b.taskRunner.ResumeTask(args, msg.From.ID); err != nil {
-		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Failed to resume task: %v", err))
-	}
-
-	return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Task %s resumed. Claude Code is working on it again.", args))
-}
-
-func (b *Bot) handleTaskStatus(msg *tgbotapi.Message, args string) error {
-	if args == "" {
-		return b.sendMessage(msg.Chat.ID, "Usage: /status <task_id>")
-	}
-
-	if b.taskRunner == nil {
-		return b.sendMessage(msg.Chat.ID, "Task runner not configured")
-	}
-
-	task, err := b.db.GetTask(args)
-	if err != nil {
-		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Task not found: %v", err))
-	}
-
-	// Check if process is actually running
-	isRunning, _ := b.taskRunner.IsTaskRunning(args)
-
-	// Get progress
-	progress, _ := b.taskRunner.GetTaskProgress(args)
-
-	statusEmoji := map[string]string{
-		"running":   "🔄",
-		"completed": "✅",
-		"failed":    "❌",
-		"cancelled": "⛔",
-	}
-
-	emoji := statusEmoji[task.Status]
-	if emoji == "" {
-		emoji = "❓"
-	}
-
-	// Build status message
-	statusMsg := fmt.Sprintf("*Task Status*\n\nID: `%s`\nStatus: %s %s\n", task.ID, emoji, task.Status)
-
-	if task.Status == "running" {
-		if isRunning {
-			statusMsg += fmt.Sprintf("Process: Running (PID %d)\n", task.PID)
-		} else {
-			statusMsg += "Process: Not running (may have crashed)\n"
-		}
-	}
-
-	statusMsg += fmt.Sprintf("Created: %s\n", task.CreatedAt.Format("2006-01-02 15:04"))
-
-	if task.CompletedAt != nil {
-		statusMsg += fmt.Sprintf("Completed: %s\n", task.CompletedAt.Format("2006-01-02 15:04"))
-	}
-
-	// Add progress if available
-	if progress != "" && progress != "No progress file found" {
-		if len(progress) > 1500 {
-			progress = progress[len(progress)-1500:]
-			progress = "...\n" + progress
-		}
-		statusMsg += fmt.Sprintf("\n*Progress:*\n```\n%s\n```", progress)
-	}
-
-	return b.sendMessage(msg.Chat.ID, statusMsg)
 }
 
 func (b *Bot) handleMessage(update tgbotapi.Update) error {
@@ -835,10 +618,6 @@ type AIResponse struct {
 }
 
 func (b *Bot) chatWithAI(messages []ChatMessage, systemPrompt string, userID, convID int64) (*AIResponse, error) {
-	tools := GetToolDefinitions()
-	currentMessages := messages
-	var usedModel string
-
 	// Inject user memory into system prompt
 	memory, err := b.db.GetUserMemory(userID)
 	if err != nil {
@@ -856,49 +635,21 @@ func (b *Bot) chatWithAI(messages []ChatMessage, systemPrompt string, userID, co
 		}
 	}
 
-	for range 10 {
-		b.sendTypingAction(userID) // Keep typing indicator
+	b.sendTypingAction(userID)
 
-		result, err := b.ai.Chat(currentMessages, systemPrompt, tools)
-		if err != nil {
-			return nil, err
-		}
-
-		usedModel = result.Model
-		response := result.Message
-
-		// No tool calls = final response
-		if len(response.ToolCalls) == 0 {
-			content, _ := response.Content.(string)
-			return &AIResponse{Content: content, Model: usedModel}, nil
-		}
-
-		log.Printf("Executing %d tool calls", len(response.ToolCalls))
-
-		// Add assistant message with tool calls
-		currentMessages = append(currentMessages, *response)
-
-		// Execute tools
-		executor := NewToolExecutor(b.db.DB, userID)
-		for _, tc := range response.ToolCalls {
-			result, err := executor.Execute(tc.Function.Name, tc.Function.Arguments, b)
-			if err != nil {
-				log.Printf("Tool error (%s): %v", tc.Function.Name, err)
-				result = fmt.Sprintf(`{"error": "%s"}`, err.Error())
-			}
-
-			currentMessages = append(currentMessages, ChatMessage{
-				Role:       "tool",
-				Content:    result,
-				ToolCallID: tc.ID,
-			})
-		}
+	result, err := b.ai.Chat(messages, systemPrompt, nil)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, fmt.Errorf("max iterations reached")
+	content, _ := result.Message.Content.(string)
+	return &AIResponse{Content: content, Model: result.Model}, nil
 }
 
 func (b *Bot) sendMessage(chatID int64, text string) error {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
 	msg := tgbotapi.NewMessage(chatID, text)
 	// Try Markdown first, fall back to plain text if it fails
 	msg.ParseMode = "Markdown"

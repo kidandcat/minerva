@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -13,26 +16,27 @@ import (
 )
 
 type PhoneBridge struct {
-	bot          *Bot
-	voiceManager *VoiceManager
-	upgrader     websocket.Upgrader
-	conn         *websocket.Conn
-	session      *phoneSession
-	send         chan []byte
-	mu           sync.Mutex
+	bot            *Bot
+	voiceManager   *VoiceManager
+	upgrader       websocket.Upgrader
+	conn           *websocket.Conn
+	session        *phoneSession
+	send           chan []byte
+	pendingPurpose string // stored from MakeCall for outgoing call prompt
+	mu             sync.Mutex
 }
 
 type phoneSession struct {
-	bridge     *PhoneBridge
-	callID     string
-	direction  string // "incoming" or "outgoing"
-	from       string
-	callerName string
-	startTime  time.Time
-	geminiConn *websocket.Conn
-	transcript []transcriptEntry
-	closed     bool
-	mu         sync.Mutex
+	bridge      *PhoneBridge
+	callID      string
+	direction   string // "incoming" or "outgoing"
+	from        string
+	callerName  string
+	startTime   time.Time
+	geminiConn  *websocket.Conn
+	transcript  []transcriptEntry
+	closed      bool
+	mu          sync.Mutex
 }
 
 type PhoneMessage struct {
@@ -51,7 +55,7 @@ func NewPhoneBridge(bot *Bot, voiceManager *VoiceManager) *PhoneBridge {
 	return &PhoneBridge{
 		bot:          bot,
 		voiceManager: voiceManager,
-		send:         make(chan []byte, 64),
+		send:         make(chan []byte, 256),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -95,6 +99,8 @@ func (pb *PhoneBridge) MakeCall(to, purpose string) error {
 	if conn == nil {
 		return fmt.Errorf("no phone connected. The Minerva Bridge app must be running and connected via /phone")
 	}
+
+	pb.pendingPurpose = purpose
 
 	msg := PhoneMessage{
 		Type:    "command",
@@ -255,27 +261,19 @@ func (pb *PhoneBridge) handleCallStart(msg PhoneMessage) {
 		transcript: make([]transcriptEntry, 0),
 	}
 
+	audioInCount = 0
+	audioOutCount = 0
 	log.Printf("[PhoneBridge] Call started: %s from %s (%s)", callID, msg.From, msg.Direction)
 
-	pb.bot.ProcessSystemEvent(pb.bot.config.AdminID,
-		fmt.Sprintf("Phone call %s: %s call from %s (%s)",
-			callID, msg.Direction, msg.From, msg.CallerName))
-}
-
-func (pb *PhoneBridge) handleCallActive() {
-	pb.mu.Lock()
+	// Connect to Gemini immediately (don't wait for call_active) so it's ready
+	// by the time the other party picks up
 	session := pb.session
-	pb.mu.Unlock()
-
-	if session == nil {
-		log.Printf("[PhoneBridge] call_active but no session")
-		return
-	}
-
+	purpose := pb.pendingPurpose
+	pb.pendingPurpose = ""
 	var prompt string
-	if session.direction == "outgoing" && session.from != "" {
+	if session.direction == "outgoing" {
 		prompt = fmt.Sprintf("%s\n\nThis is an outgoing call to %s. Purpose: %s",
-			systemPromptVoice, session.from, session.callerName)
+			systemPromptVoice, msg.To, purpose)
 	} else {
 		prompt = systemPromptVoice
 		if session.callerName != "" {
@@ -287,8 +285,49 @@ func (pb *PhoneBridge) handleCallActive() {
 		}
 	}
 
-	pb.connectGemini(session, prompt)
+	go pb.connectGemini(session, prompt)
 }
+
+
+// enableIncallMusicMixer enables routing of MultiMedia1 audio into the active voice call
+// via the Qualcomm MSM audio HAL mixer control.
+func enableIncallMusicMixer(enable bool) {
+	val := "0"
+	if enable {
+		val = "1"
+	}
+	// Enable both MultiMedia1 and MultiMedia2 for incall music routing.
+	// mixer_paths.xml uses MultiMedia2 (832), but we enable both to be safe.
+	// Incall_Music_2 variants (827,828) are for the second voice session.
+	controls := []int{831, 832, 827, 828}
+	for _, ctrl := range controls {
+		cmd := exec.Command("su", "-c", fmt.Sprintf("tinymix %d %s", ctrl, val))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[PhoneBridge] tinymix %d incall_music %s failed: %v (%s)", ctrl, val, err, string(out))
+		}
+	}
+	log.Printf("[PhoneBridge] Incall_Music mixers %s (831,832,827,828)", map[bool]string{true: "ENABLED", false: "DISABLED"}[enable])
+}
+
+
+func (pb *PhoneBridge) handleCallActive() {
+	pb.mu.Lock()
+	session := pb.session
+	pb.mu.Unlock()
+
+	if session == nil {
+		log.Printf("[PhoneBridge] call_active but no session")
+		return
+	}
+
+	log.Printf("[PhoneBridge] Call active: %s", session.callID)
+
+	// Enable incall music mixer to route our playback audio into the voice call uplink
+	enableIncallMusicMixer(true)
+}
+
+var audioInCount int
+var audioOutCount int
 
 func (pb *PhoneBridge) handleAudio(base64Audio string) {
 	pb.mu.Lock()
@@ -305,13 +344,24 @@ func (pb *PhoneBridge) handleAudio(base64Audio string) {
 	session.mu.Unlock()
 
 	if geminiConn == nil || closed {
+		audioInCount++
+		if audioInCount <= 5 || audioInCount%100 == 0 {
+			log.Printf("[PhoneBridge] Audio IN dropped #%d: conn=%v, closed=%v", audioInCount, geminiConn != nil, closed)
+		}
 		return
 	}
 
+	audioInCount++
 	pcmData, err := base64.StdEncoding.DecodeString(base64Audio)
 	if err != nil {
 		log.Printf("[PhoneBridge] Failed to decode audio: %v", err)
 		return
+	}
+
+	// Log audio energy to verify it's not silence
+	if audioInCount == 1 || audioInCount%100 == 0 {
+		rms := pcmRMS(pcmData)
+		log.Printf("[PhoneBridge] Audio IN #%d: %d bytes, RMS=%.1f", audioInCount, len(pcmData), rms)
 	}
 
 	// Send PCM 16kHz to Gemini
@@ -362,6 +412,9 @@ func (pb *PhoneBridge) handleCallEnd() {
 		geminiConn.Close()
 	}
 
+	// Disable call audio mixers
+	go enableIncallMusicMixer(false)
+
 	duration := time.Since(session.startTime)
 	log.Printf("[PhoneBridge] Call ended: %s (duration: %s)", session.callID, duration.Round(time.Second))
 
@@ -377,6 +430,9 @@ func (pb *PhoneBridge) connectGemini(session *phoneSession, prompt string) {
 		return
 	}
 
+	// No clientContent text here - let Gemini respond to actual audio via realtimeInput.
+	// Mixing clientContent text with realtimeInput audio breaks Gemini's audio mode.
+
 	session.mu.Lock()
 	session.geminiConn = geminiConn
 	session.mu.Unlock()
@@ -386,9 +442,26 @@ func (pb *PhoneBridge) connectGemini(session *phoneSession, prompt string) {
 	go pb.geminiToPhone(session)
 }
 
+// pcmRMS calculates the RMS (root mean square) energy of 16-bit little-endian PCM audio.
+// Returns 0 for silence, ~32768 for max amplitude.
+func pcmRMS(pcm []byte) float64 {
+	if len(pcm) < 2 {
+		return 0
+	}
+	samples := len(pcm) / 2
+	var sumSq float64
+	for i := 0; i < samples; i++ {
+		sample := int16(binary.LittleEndian.Uint16(pcm[i*2 : i*2+2]))
+		sumSq += float64(sample) * float64(sample)
+	}
+	return math.Sqrt(sumSq / float64(samples))
+}
+
 func (pb *PhoneBridge) geminiToPhone(session *phoneSession) {
+	log.Printf("[PhoneBridge] geminiToPhone started for %s", session.callID)
 	defer func() {
 		session.mu.Lock()
+		wasClosed := session.closed
 		if !session.closed {
 			session.closed = true
 			if session.geminiConn != nil {
@@ -396,7 +469,10 @@ func (pb *PhoneBridge) geminiToPhone(session *phoneSession) {
 			}
 		}
 		session.mu.Unlock()
+		log.Printf("[PhoneBridge] geminiToPhone exiting for %s (wasClosed=%v)", session.callID, wasClosed)
 	}()
+
+	geminiMsgCount := 0
 
 	for {
 		session.mu.Lock()
@@ -405,6 +481,7 @@ func (pb *PhoneBridge) geminiToPhone(session *phoneSession) {
 		session.mu.Unlock()
 
 		if closed || geminiConn == nil {
+			log.Printf("[PhoneBridge] geminiToPhone loop exit: closed=%v, conn=%v", closed, geminiConn != nil)
 			return
 		}
 
@@ -416,10 +493,37 @@ func (pb *PhoneBridge) geminiToPhone(session *phoneSession) {
 			return
 		}
 
+		geminiMsgCount++
+
+		// Log message type for debugging
+		msgType := "unknown"
+		if serverMsg.ServerContent != nil {
+			if serverMsg.ServerContent.ModelTurn != nil {
+				msgType = "modelTurn"
+			} else if serverMsg.ServerContent.TurnComplete != nil {
+				msgType = "turnComplete"
+			} else if serverMsg.ServerContent.InputTranscription != nil {
+				msgType = "inputTranscription"
+			} else if serverMsg.ServerContent.OutputTranscription != nil {
+				msgType = "outputTranscription"
+			} else {
+				msgType = "serverContent(other)"
+			}
+		} else if serverMsg.ToolCall != nil {
+			msgType = "toolCall"
+		}
+		if geminiMsgCount <= 10 || geminiMsgCount%50 == 0 {
+			log.Printf("[PhoneBridge] Gemini msg #%d: type=%s", geminiMsgCount, msgType)
+		}
+
 		// Handle audio response from Gemini
 		if serverMsg.ServerContent != nil && serverMsg.ServerContent.ModelTurn != nil {
 			for _, part := range serverMsg.ServerContent.ModelTurn.Parts {
 				if part.InlineData != nil && part.InlineData.Data != "" {
+					audioOutCount++
+					if audioOutCount == 1 || audioOutCount%50 == 0 {
+						log.Printf("[PhoneBridge] Audio OUT from Gemini: %d chunks", audioOutCount)
+					}
 					// Decode Gemini's 24kHz PCM audio
 					audioData, err := base64.StdEncoding.DecodeString(part.InlineData.Data)
 					if err != nil {
@@ -457,6 +561,7 @@ func (pb *PhoneBridge) geminiToPhone(session *phoneSession) {
 
 		// Handle transcript from user side
 		if serverMsg.ServerContent != nil && serverMsg.ServerContent.InputTranscription != nil && serverMsg.ServerContent.InputTranscription.Text != "" {
+			log.Printf("[PhoneBridge] Input transcription: %s", serverMsg.ServerContent.InputTranscription.Text)
 			session.mu.Lock()
 			session.transcript = append(session.transcript, transcriptEntry{
 				Speaker: "user",
@@ -467,6 +572,7 @@ func (pb *PhoneBridge) geminiToPhone(session *phoneSession) {
 
 		// Handle transcript from assistant side
 		if serverMsg.ServerContent != nil && serverMsg.ServerContent.OutputTranscription != nil && serverMsg.ServerContent.OutputTranscription.Text != "" {
+			log.Printf("[PhoneBridge] Output transcription: %s", serverMsg.ServerContent.OutputTranscription.Text)
 			session.mu.Lock()
 			session.transcript = append(session.transcript, transcriptEntry{
 				Speaker: "assistant",

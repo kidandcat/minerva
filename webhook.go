@@ -265,10 +265,18 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 
 	// Generate task ID
 	taskID := fmt.Sprintf("%d", time.Now().UnixNano())
+	log.Printf("[Agent] Task %s dispatched to agent '%s' (dir: %s, prompt: %s)", taskID, req.Agent, req.Dir, truncateText(req.Prompt, 100))
 
 	// Run task asynchronously
 	go func(taskID, agent, prompt, dir string) {
 		result, err := w.agentHub.SendTask(agent, prompt, dir, 60*time.Minute)
+		if err != nil {
+			log.Printf("[Agent] Task %s on '%s' failed: %v", taskID, agent, err)
+		} else if result != nil && result.Error != "" {
+			log.Printf("[Agent] Task %s on '%s' completed with error: %s", taskID, agent, truncateText(result.Error, 200))
+		} else {
+			log.Printf("[Agent] Task %s on '%s' completed successfully", taskID, agent)
+		}
 
 		// Feed result back to Minerva (the AI brain)
 		w.processAgentResultWithAI(taskID, agent, prompt, dir, result, err)
@@ -381,12 +389,23 @@ The agent task completed successfully. Please summarize the result for the user.
 	// Save the agent result as a user message (internal)
 	w.bot.db.SaveMessage(conv.ID, "user", agentResultMsg, nil)
 
-	// Chat with AI
+	// Chat with AI to summarize result
 	response, err := w.bot.chatWithAI(messages, user.SystemPrompt, user.ID, conv.ID)
 	if err != nil {
 		log.Printf("Failed to process agent result with AI: %v", err)
-		// Fallback: send raw result to user
-		w.bot.sendMessage(adminID, fmt.Sprintf("Agent '%s' completó la tarea pero hubo error procesando: %v", agent, err))
+		// Fallback: send raw result directly to user
+		var rawOutput string
+		if taskErr != nil {
+			rawOutput = fmt.Sprintf("Error: %v", taskErr)
+		} else if result != nil {
+			rawOutput = result.Output
+			if result.Error != "" {
+				rawOutput = fmt.Sprintf("Error: %s\nOutput: %s", result.Error, rawOutput)
+			}
+		} else {
+			rawOutput = "(no output)"
+		}
+		w.bot.sendMessage(adminID, fmt.Sprintf("Agent '%s' task result (AI summary failed: %v):\n\n%s", agent, err, truncateText(rawOutput, 3000)))
 		return
 	}
 

@@ -112,6 +112,16 @@ func main() {
 	bot.agentHub = NewAgentHub(config.AgentPassword, agentNotify)
 	log.Println("Agent hub initialized")
 
+	// Initialize voice manager and phone bridge
+	var phoneBridge *PhoneBridge
+	if config.GoogleAPIKey != "" {
+		voiceManager := NewVoiceManager(bot, config.GoogleAPIKey)
+		phoneBridge = NewPhoneBridge(bot, voiceManager)
+		log.Println("Voice manager and phone bridge initialized")
+	} else {
+		log.Println("GOOGLE_API_KEY not set, phone bridge disabled")
+	}
+
 	// Start reminder checker
 	stopReminders := make(chan struct{})
 	go func() {
@@ -131,7 +141,7 @@ func main() {
 
 	// Start webhook server
 	if config.WebhookPort > 0 {
-		webhook := NewWebhookServer(bot, config.WebhookPort, bot.agentHub)
+		webhook := NewWebhookServer(bot, config.WebhookPort, bot.agentHub, phoneBridge)
 		go func() {
 			if err := webhook.Start(); err != nil {
 				log.Printf("Webhook server error: %v", err)
@@ -212,8 +222,6 @@ func runCLI() {
 		handleEmailCLI(config, args)
 	case "call":
 		handleCallCLI(config, args)
-	case "phone":
-		handlePhoneCLI(config, args)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command: %s\n", cmd)
 		printUsage()
@@ -238,9 +246,7 @@ Usage:
   minerva-android agent list                   List connected agents and their projects
   minerva-android agent run <name> "prompt" [--dir /path]  Run a task on an agent
   minerva-android email send <to> --subject "subject" --body "body"  Send email via Resend
-  minerva-android call <number> "purpose"      Make a phone call (via Twilio)
-  minerva-android phone list                   List connected Android phones
-  minerva-android phone call <number> "purpose"  Make a call via Android phone
+  minerva-android call <number> "purpose"      Make a phone call (via Android + Gemini Live)
   minerva-android help                         Show this help message`)
 }
 
@@ -645,7 +651,7 @@ func handleCallCLI(config *Config, args []string) {
 		"purpose": purpose,
 	})
 
-	resp, err := http.Post(baseURL+"/voice/call", "application/json", bytes.NewReader(reqBody))
+	resp, err := http.Post(baseURL+"/phone/call", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
 		os.Exit(1)
@@ -654,63 +660,6 @@ func handleCallCLI(config *Config, args []string) {
 
 	body, _ := io.ReadAll(resp.Body)
 	fmt.Println(string(body))
-}
-
-func handlePhoneCLI(config *Config, args []string) {
-	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "error: phone subcommand required (list, call)\n")
-		os.Exit(1)
-	}
-
-	subcmd := args[0]
-	subargs := args[1:]
-
-	// Default to localhost webhook server
-	baseURL := fmt.Sprintf("http://localhost:%d", config.WebhookPort)
-	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
-		baseURL = envURL
-	}
-
-	switch subcmd {
-	case "list":
-		resp, err := http.Get(baseURL + "/phone/list")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
-			os.Exit(1)
-		}
-		defer resp.Body.Close()
-
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Println(string(body))
-
-	case "call":
-		if len(subargs) < 2 {
-			fmt.Fprintf(os.Stderr, "error: usage: minerva-android phone call <number> \"purpose\"\n")
-			os.Exit(1)
-		}
-
-		phoneNumber := subargs[0]
-		purpose := subargs[1]
-
-		reqBody, _ := json.Marshal(map[string]string{
-			"to":      phoneNumber,
-			"purpose": purpose,
-		})
-
-		resp, err := http.Post(baseURL+"/phone/call", "application/json", bytes.NewReader(reqBody))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: failed to connect to Minerva: %v\n", err)
-			os.Exit(1)
-		}
-		defer resp.Body.Close()
-
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Println(string(body))
-
-	default:
-		fmt.Fprintf(os.Stderr, "error: unknown phone subcommand: %s\n", subcmd)
-		os.Exit(1)
-	}
 }
 
 // dropPrivileges drops from root to Termux user (u0_a129 / UID 10129)

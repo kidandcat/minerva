@@ -59,22 +59,15 @@ minerva agent list                                         # List connected agen
 minerva agent run <name> "prompt" [--dir /path]            # Run task on agent
 ```
 
-## AI Tools (available to the bot)
+## AI Brain (Claude CLI)
 
-| Tool | Description |
-|------|-------------|
-| `create_reminder` | Create time-based reminders (target: user or ai) |
-| `list_reminders` | List pending reminders |
-| `delete_reminder` | Dismiss a reminder (only on user request) |
-| `reschedule_reminder` | Reschedule a fired reminder |
-| `update_memory` | Store persistent user info (2000 char limit) |
-| `run_code` | Execute JavaScript in sandboxed goja VM (5s timeout) |
-| `send_email` | Send email via Resend API |
-| `make_call` | Initiate outbound phone call (Twilio + Gemini Live) |
-| `create_task` | Launch background Claude Code task |
-| `get_task_progress` | Check background task status |
-| `run_claude` | Run task on remote Claude Code agent |
-| `list_claude_projects` | List projects on connected agents |
+The AI brain runs as `claude -p --dangerously-skip-permissions --output-format text` in `./workspace`.
+Claude CLI reads `workspace/CLAUDE.md` automatically, which contains all tool instructions.
+
+**Important**: Claude CLI cannot use custom tool definitions (ToolCalls). Instead, all Minerva
+tools are exposed as CLI commands that Claude executes via its built-in Bash tool.
+The `workspace/CLAUDE.md` file documents all available CLI commands. When deploying a new
+Minerva instance, copy `workspace/CLAUDE.md` to the workspace directory.
 
 ## Webhook Endpoints
 

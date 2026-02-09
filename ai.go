@@ -223,7 +223,17 @@ func (c *AIClient) executeClaude(prompt string) (string, error) {
 		}
 		errMsg := strings.TrimSpace(stderr.String())
 		outMsg := strings.TrimSpace(stdout.String())
+		combined := errMsg + " " + outMsg
 		log.Printf("[AI] Claude failed: err=%v stderr=%q stdout=%q", err, truncate(errMsg, 300), truncate(outMsg, 300))
+
+		// Detect auth errors and suggest /token
+		if strings.Contains(strings.ToLower(combined), "auth") ||
+			strings.Contains(strings.ToLower(combined), "token") ||
+			strings.Contains(strings.ToLower(combined), "unauthorized") ||
+			strings.Contains(strings.ToLower(combined), "expired") ||
+			strings.Contains(strings.ToLower(combined), "login") {
+			return "", fmt.Errorf("claude auth error (usa /token para actualizar): %s", errMsg)
+		}
 		if errMsg != "" {
 			return "", fmt.Errorf("claude error: %w\nstderr: %s", err, errMsg)
 		}

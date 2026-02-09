@@ -183,3 +183,13 @@ Update MEMORY.md when you learn something important that should be remembered ac
 - If something is ambiguous, ask for clarification
 - When using agents, always check the project list first to know what's available
 - **NEVER add signatures, footers, or model names** to your responses (no "claude-cli", no "Minerva", etc.)
+
+## CRITICAL: Always Execute Commands
+
+**NEVER simulate or fabricate CLI command outputs.** When you need to use a tool (like `minerva agent run`, `minerva reminder create`, etc.), you MUST actually execute the command via Bash and use the real output. Never generate fake task IDs, fake JSON responses, or pretend you ran a command. If a command fails, report the actual error.
+
+**Agents:** To interact with agents you MUST ALWAYS use the `minerva` CLI:
+- `minerva agent list` to see connected agents
+- `minerva agent run <name> "prompt" [--dir /path]` to run tasks
+
+Never call agent HTTP endpoints directly, never fabricate agent responses, and never assume an agent is unavailable without actually running the command first.
