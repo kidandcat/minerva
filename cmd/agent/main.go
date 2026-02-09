@@ -20,8 +20,7 @@ import (
 
 // AgentConfig is loaded from ~/.minerva-agent.json
 type AgentConfig struct {
-	HomeDir  string   `json:"home_dir"`
-	Projects []string `json:"projects"`
+	HomeDir string `json:"home_dir"`
 }
 
 func loadConfig() AgentConfig {
@@ -43,7 +42,7 @@ func loadConfig() AgentConfig {
 		cfg.HomeDir = home
 	}
 
-	log.Printf("Loaded config from %s (homeDir=%s, projects=%d)", configPath, cfg.HomeDir, len(cfg.Projects))
+	log.Printf("Loaded config from %s (homeDir=%s)", configPath, cfg.HomeDir)
 	return cfg
 }
 
@@ -81,14 +80,13 @@ type AgentMessage struct {
 }
 
 type Agent struct {
-	name       string
-	relayURL   string
-	password   string
-	homeDir    string
-	configProj []string // explicit project list from config
-	conn       *websocket.Conn
-	mu         sync.Mutex
-	stopCh     chan struct{}
+	name     string
+	relayURL string
+	password string
+	homeDir  string
+	conn     *websocket.Conn
+	mu       sync.Mutex
+	stopCh   chan struct{}
 }
 
 func main() {
@@ -109,12 +107,11 @@ func main() {
 	cfg := loadConfig()
 
 	agent := &Agent{
-		name:       *name,
-		relayURL:   *relayURL,
-		password:   *password,
-		homeDir:    cfg.HomeDir,
-		configProj: cfg.Projects,
-		stopCh:     make(chan struct{}),
+		name:     *name,
+		relayURL: *relayURL,
+		password: *password,
+		homeDir:  cfg.HomeDir,
+		stopCh:   make(chan struct{}),
 	}
 
 	// Handle graceful shutdown
@@ -182,12 +179,6 @@ func (a *Agent) connect() error {
 }
 
 func (a *Agent) listProjects() []string {
-	// If config specifies explicit projects, use those
-	if len(a.configProj) > 0 {
-		return a.configProj
-	}
-
-	// Otherwise auto-detect from homeDir
 	var projects []string
 	entries, err := os.ReadDir(a.homeDir)
 	if err != nil {
