@@ -235,7 +235,8 @@ func (w *WebhookServer) handleAgentList(rw http.ResponseWriter, r *http.Request)
 	json.NewEncoder(rw).Encode(result)
 }
 
-// handleAgentRun executes a task on an agent asynchronously
+// handleAgentRun sends a task to an agent asynchronously.
+// Results arrive via the agent WebSocket and are sent directly to Telegram.
 func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(rw, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
@@ -263,159 +264,31 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Generate task ID
-	taskID := fmt.Sprintf("%d", time.Now().UnixNano())
-	log.Printf("[Agent] Task %s dispatched to agent '%s' (dir: %s, prompt: %s)", taskID, req.Agent, req.Dir, truncateText(req.Prompt, 100))
+	_, err := w.agentHub.SendTask(req.Agent, req.Prompt, req.Dir)
+	if err != nil {
+		log.Printf("[Agent] Failed to send task to '%s': %v", req.Agent, err)
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(rw).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
 
-	// Run task asynchronously
-	go func(taskID, agent, prompt, dir string) {
-		result, err := w.agentHub.SendTask(agent, prompt, dir, 60*time.Minute)
-		if err != nil {
-			log.Printf("[Agent] Task %s on '%s' failed: %v", taskID, agent, err)
-		} else if result != nil && result.Error != "" {
-			log.Printf("[Agent] Task %s on '%s' completed with error: %s", taskID, agent, truncateText(result.Error, 200))
-		} else {
-			log.Printf("[Agent] Task %s on '%s' completed successfully", taskID, agent)
+	// Notify admin that agent started
+	if w.bot != nil && w.bot.config.AdminID != 0 {
+		notification := fmt.Sprintf("⚡ *Agent '%s'*\n*Prompt:* %s", req.Agent, req.Prompt)
+		if req.Dir != "" {
+			notification += fmt.Sprintf("\n*Dir:* `%s`", req.Dir)
 		}
+		w.bot.sendMessage(w.bot.config.AdminID, notification)
+	}
 
-		// Feed result back to Minerva (the AI brain)
-		w.processAgentResultWithAI(taskID, agent, prompt, dir, result, err)
-	}(taskID, req.Agent, req.Prompt, req.Dir)
-
-	// Return immediately
 	rw.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(rw).Encode(map[string]interface{}{
 		"status":  "started",
-		"task_id": taskID,
-		"message": fmt.Sprintf("Task started on agent '%s'", req.Agent),
+		"message": fmt.Sprintf("Claude is now running on agent '%s'.", req.Agent),
 	})
-}
-
-// processAgentResultWithAI feeds agent task results back to Minerva for processing
-func (w *WebhookServer) processAgentResultWithAI(taskID, agent, prompt, dir string, result *AgentMessage, taskErr error) {
-	adminID := w.bot.config.AdminID
-	if adminID == 0 {
-		log.Printf("Agent task %s completed but no admin ID configured", taskID)
-		return
-	}
-
-	// Get or create user for admin
-	user, _, err := w.bot.db.GetOrCreateUser(adminID, "", "")
-	if err != nil {
-		log.Printf("Failed to get user for agent result processing: %v", err)
-		return
-	}
-
-	// Get active conversation
-	conv, err := w.bot.db.GetActiveConversation(user.ID)
-	if err != nil {
-		log.Printf("Failed to get conversation for agent result processing: %v", err)
-		return
-	}
-
-	// Load context
-	dbMessages, err := w.bot.db.GetConversationMessages(conv.ID, w.bot.config.MaxContextMessages)
-	if err != nil {
-		log.Printf("Failed to get messages for agent result processing: %v", err)
-		return
-	}
-
-	var messages []ChatMessage
-	for _, m := range dbMessages {
-		messages = append(messages, ChatMessage{
-			Role:    m.Role,
-			Content: m.Content,
-		})
-	}
-
-	// Format agent result as a message for Minerva
-	var agentResultMsg string
-	if taskErr != nil {
-		agentResultMsg = fmt.Sprintf(`<agent_task_result>
-<status>error</status>
-<agent>%s</agent>
-<prompt>%s</prompt>
-<dir>%s</dir>
-<error>%s</error>
-</agent_task_result>
-
-The agent task failed. Please inform the user about this error.`, agent, prompt, dir, taskErr.Error())
-	} else if result == nil {
-		agentResultMsg = fmt.Sprintf(`<agent_task_result>
-<status>error</status>
-<agent>%s</agent>
-<prompt>%s</prompt>
-<dir>%s</dir>
-<error>Agent returned no result</error>
-</agent_task_result>
-
-The agent task returned no result. Please inform the user.`, agent, prompt, dir)
-	} else if result.Error != "" {
-		agentResultMsg = fmt.Sprintf(`<agent_task_result>
-<status>completed_with_error</status>
-<agent>%s</agent>
-<prompt>%s</prompt>
-<dir>%s</dir>
-<error>%s</error>
-<output>
-%s
-</output>
-</agent_task_result>
-
-The agent task completed but reported an error. Please summarize the result for the user.`, agent, prompt, dir, result.Error, truncateText(result.Output, 10000))
-	} else {
-		output := result.Output
-		if output == "" {
-			output = "(no output produced)"
-		}
-		agentResultMsg = fmt.Sprintf(`<agent_task_result>
-<status>success</status>
-<agent>%s</agent>
-<prompt>%s</prompt>
-<dir>%s</dir>
-<output>
-%s
-</output>
-</agent_task_result>
-
-The agent task completed successfully. Please summarize the result for the user.`, agent, prompt, dir, truncateText(output, 10000))
-	}
-
-	messages = append(messages, ChatMessage{
-		Role:    "user",
-		Content: agentResultMsg,
-	})
-
-	// Save the agent result as a user message (internal)
-	w.bot.db.SaveMessage(conv.ID, "user", agentResultMsg, nil)
-
-	// Chat with AI to summarize result
-	response, err := w.bot.chatWithAI(messages, user.SystemPrompt, user.ID, conv.ID)
-	if err != nil {
-		log.Printf("Failed to process agent result with AI: %v", err)
-		// Fallback: send raw result directly to user
-		var rawOutput string
-		if taskErr != nil {
-			rawOutput = fmt.Sprintf("Error: %v", taskErr)
-		} else if result != nil {
-			rawOutput = result.Output
-			if result.Error != "" {
-				rawOutput = fmt.Sprintf("Error: %s\nOutput: %s", result.Error, rawOutput)
-			}
-		} else {
-			rawOutput = "(no output)"
-		}
-		w.bot.sendMessage(adminID, fmt.Sprintf("Agent '%s' task result (AI summary failed: %v):\n\n%s", agent, err, truncateText(rawOutput, 3000)))
-		return
-	}
-
-	// Save assistant response
-	w.bot.db.SaveMessage(conv.ID, "assistant", response.Content, nil)
-
-	// Send AI response to admin
-	if err := w.bot.sendMessage(adminID, response.Content); err != nil {
-		log.Printf("Failed to send agent result AI response: %v", err)
-	}
 }
 
 // verifySignature verifies the Svix webhook signature

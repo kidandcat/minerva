@@ -77,7 +77,15 @@ func StartServer(config *Config) error {
 			bot.sendMessage(config.AdminID, message)
 		}
 	}
-	bot.agentHub = NewAgentHub(config.AgentPassword, agentNotify)
+	agentResult := func(message string) {
+		if config.AdminID != 0 {
+			if err := bot.ProcessSystemEvent(config.AdminID, message); err != nil {
+				log.Printf("[Agent] Failed to process result through AI brain: %v", err)
+				bot.sendMessage(config.AdminID, message)
+			}
+		}
+	}
+	bot.agentHub = NewAgentHub(config.AgentPassword, agentNotify, agentResult)
 	if config.AgentPassword != "" {
 		log.Println("Agent hub initialized (password protected)")
 	} else {

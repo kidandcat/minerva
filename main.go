@@ -137,6 +137,8 @@ func runCLI() {
 		handleCallCLI(config, args)
 	case "phone":
 		handlePhoneCLI(config, args)
+	case "file":
+		handleFileCLI(config, args)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command: %s\n", cmd)
 		printUsage()
@@ -163,6 +165,7 @@ Usage:
   minerva call <number> "purpose"      Make a phone call (via Twilio)
   minerva phone list                   List connected Android phones
   minerva phone call <number> "purpose"  Make a call via Android phone
+  minerva file send <path> ["caption"]  Send a file to admin via Telegram
   minerva help                         Show this help message`)
 }
 
@@ -634,6 +637,76 @@ func handlePhoneCLI(config *Config, args []string) {
 		fmt.Fprintf(os.Stderr, "error: unknown phone subcommand: %s\n", subcmd)
 		os.Exit(1)
 	}
+}
+
+func handleFileCLI(config *Config, args []string) {
+	if len(args) < 2 || args[0] != "send" {
+		fmt.Fprintf(os.Stderr, "error: usage: minerva file send <path> [\"caption\"]\n")
+		os.Exit(1)
+	}
+
+	filePath := args[1]
+	caption := ""
+	if len(args) > 2 {
+		caption = args[2]
+	}
+
+	if config.TelegramBotToken == "" {
+		fmt.Fprintf(os.Stderr, "error: TELEGRAM_BOT_TOKEN not configured\n")
+		os.Exit(1)
+	}
+	if config.AdminID == 0 {
+		fmt.Fprintf(os.Stderr, "error: ADMIN_ID not configured\n")
+		os.Exit(1)
+	}
+
+	// Verify file exists
+	info, err := os.Stat(filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if info.IsDir() {
+		fmt.Fprintf(os.Stderr, "error: %s is a directory, not a file\n", filePath)
+		os.Exit(1)
+	}
+
+	api, err := tgbotapi.NewBotAPI(config.TelegramBotToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to create bot API: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Send as photo for image files, document for everything else
+	ext := strings.ToLower(filePath)
+	isImage := strings.HasSuffix(ext, ".jpg") || strings.HasSuffix(ext, ".jpeg") ||
+		strings.HasSuffix(ext, ".png") || strings.HasSuffix(ext, ".gif") ||
+		strings.HasSuffix(ext, ".webp")
+
+	var msg tgbotapi.Chattable
+	if isImage {
+		photo := tgbotapi.NewPhoto(config.AdminID, tgbotapi.FilePath(filePath))
+		photo.Caption = caption
+		msg = photo
+	} else {
+		doc := tgbotapi.NewDocument(config.AdminID, tgbotapi.FilePath(filePath))
+		doc.Caption = caption
+		msg = doc
+	}
+
+	_, err = api.Send(msg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to send file: %v\n", err)
+		os.Exit(1)
+	}
+
+	result, _ := json.Marshal(map[string]any{
+		"success":   true,
+		"message":   "File sent to admin",
+		"file_name": info.Name(),
+		"file_size": info.Size(),
+	})
+	fmt.Println(string(result))
 }
 
 // runBot runs the main Telegram bot

@@ -347,6 +347,11 @@ func (db *DB) GetConversationMessages(convID int64, limit int) ([]Message, error
 }
 
 // SaveMessage saves a message to the database
+func (db *DB) ClearConversationMessages(convID int64) error {
+	_, err := db.Exec(`DELETE FROM messages WHERE conversation_id = ?`, convID)
+	return err
+}
+
 func (db *DB) SaveMessage(convID int64, role, content string, toolCalls *string) error {
 	_, err := db.Exec(`
 		INSERT INTO messages (conversation_id, role, content, tool_calls) VALUES (?, ?, ?, ?)

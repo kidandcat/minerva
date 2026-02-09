@@ -22,7 +22,8 @@ type PhoneBridge struct {
 	conn           *websocket.Conn
 	session        *phoneSession
 	send           chan []byte
-	pendingPurpose string // stored from MakeCall for outgoing call prompt
+	done           chan struct{} // signals old read/write pumps to stop
+	pendingPurpose string       // stored from MakeCall for outgoing call prompt
 	mu             sync.Mutex
 }
 
@@ -72,17 +73,25 @@ func (pb *PhoneBridge) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pb.mu.Lock()
+	// Stop old pumps before starting new ones
+	if pb.done != nil {
+		close(pb.done)
+	}
 	if pb.conn != nil {
 		log.Printf("[PhoneBridge] Replacing existing connection")
 		pb.conn.Close()
 	}
 	pb.conn = conn
+	// Drain old send channel and create fresh one
+	pb.send = make(chan []byte, 256)
+	pb.done = make(chan struct{})
+	done := pb.done
 	pb.mu.Unlock()
 
 	log.Printf("[PhoneBridge] Connected")
 
-	go pb.readPump()
-	go pb.writePump()
+	go pb.readPump(conn, done)
+	go pb.writePump(conn, done)
 }
 
 func (pb *PhoneBridge) IsConnected() bool {
@@ -136,14 +145,10 @@ func (pb *PhoneBridge) disconnect() {
 }
 
 // readPump reads messages from the WebSocket connection.
-func (pb *PhoneBridge) readPump() {
+func (pb *PhoneBridge) readPump(conn *websocket.Conn, done chan struct{}) {
 	defer func() {
 		pb.disconnect()
 	}()
-
-	pb.mu.Lock()
-	conn := pb.conn
-	pb.mu.Unlock()
 
 	conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 	conn.SetPongHandler(func(string) error {
@@ -152,6 +157,12 @@ func (pb *PhoneBridge) readPump() {
 	})
 
 	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
@@ -171,22 +182,14 @@ func (pb *PhoneBridge) readPump() {
 }
 
 // writePump writes messages to the WebSocket connection with ping keepalive.
-func (pb *PhoneBridge) writePump() {
+func (pb *PhoneBridge) writePump(conn *websocket.Conn, done chan struct{}) {
 	ticker := time.NewTicker(30 * time.Second)
-	defer func() {
-		ticker.Stop()
-	}()
+	defer ticker.Stop()
 
 	for {
-		pb.mu.Lock()
-		conn := pb.conn
-		pb.mu.Unlock()
-
-		if conn == nil {
-			return
-		}
-
 		select {
+		case <-done:
+			return
 		case message, ok := <-pb.send:
 			if !ok {
 				conn.WriteMessage(websocket.CloseMessage, []byte{})
@@ -289,6 +292,33 @@ func (pb *PhoneBridge) handleCallStart(msg PhoneMessage) {
 }
 
 
+// enableVoiceRecordMixers enables the DSP voice recording path so that
+// AudioRecord with VOICE_DOWNLINK actually receives call audio.
+func enableVoiceRecordMixers(enable bool) {
+	val := "0"
+	if enable {
+		val = "1"
+	}
+	// Set Voc VSID to VOICEMMODE1_VSID (0x11C05000 = 297816064)
+	if enable {
+		cmd := exec.Command("su", "-c", "tinymix 1684 297816064")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[PhoneBridge] tinymix Voc VSID failed: %v (%s)", err, string(out))
+		}
+	}
+	// VOC_REC_DL and VOC_REC_UL on MultiMedia1 (controls 1131, 1132)
+	controls := []int{1131, 1132}
+	for _, ctrl := range controls {
+		cmd := exec.Command("su", "-c", fmt.Sprintf("tinymix %d %s", ctrl, val))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[PhoneBridge] tinymix %d VOC_REC %s failed: %v (%s)", ctrl, val, err, string(out))
+		}
+	}
+	log.Printf("[PhoneBridge] VOC_REC mixers %s (1131,1132), Voc VSID=%s",
+		map[bool]string{true: "ENABLED", false: "DISABLED"}[enable],
+		map[bool]string{true: "297816064", false: "unchanged"}[enable])
+}
+
 // enableIncallMusicMixer enables routing of MultiMedia1 audio into the active voice call
 // via the Qualcomm MSM audio HAL mixer control.
 func enableIncallMusicMixer(enable bool) {
@@ -321,6 +351,9 @@ func (pb *PhoneBridge) handleCallActive() {
 	}
 
 	log.Printf("[PhoneBridge] Call active: %s", session.callID)
+
+	// Note: VOC_REC mixers disabled - MSM8937 ADSP doesn't support VoiceMMode1 recording.
+	// Recording is done via speakerphone + microphone instead.
 
 	// Enable incall music mixer to route our playback audio into the voice call uplink
 	enableIncallMusicMixer(true)

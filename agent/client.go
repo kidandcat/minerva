@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -15,6 +15,7 @@ import (
 const (
 	MsgTypeRegister     = "register"
 	MsgTypeTask         = "task"
+	MsgTypeAck          = "ack"
 	MsgTypeResult       = "result"
 	MsgTypeStatus       = "status"
 	MsgTypePing         = "ping"
@@ -190,39 +191,61 @@ func (c *Client) pingLoop() {
 }
 
 func (c *Client) handleTask(task Message) {
-	log.Printf("Received task %s: %s", task.ID, truncate(task.Prompt, 50))
+	log.Printf("[Task %s] Received: %s", task.ID, truncate(task.Prompt, 100))
 
 	// Determine working directory
 	dir := c.workingDir
 	if task.Dir != "" {
 		dir = task.Dir
 	}
+	log.Printf("[Task %s] Working dir: %s", task.ID, dir)
 
-	// Execute claude with 55 min timeout (server has 60 min timeout)
-	result, err := c.executor.Run(task.Prompt, dir, 55*time.Minute)
+	// Start claude (non-blocking) with 55 min timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
+	start := time.Now()
 
-	// Send result
-	msg := Message{
-		Type: MsgTypeResult,
-		ID:   task.ID,
-	}
-
+	cmd, stdout, stderr, err := c.executor.Start(ctx, task.Prompt, dir)
 	if err != nil {
-		msg.Error = err.Error()
-		msg.ExitCode = 1
-	} else {
-		msg.Output = result.Output
-		msg.ExitCode = result.ExitCode
-		msg.Duration = result.DurationMs
+		cancel()
+		// Send ACK with error - claude failed to start
+		log.Printf("[Task %s] Failed to start: %v", task.ID, err)
+		c.send(Message{
+			Type:  MsgTypeAck,
+			ID:    task.ID,
+			Error: err.Error(),
+		})
+		return
 	}
 
-	if err := c.send(msg); err != nil {
-		log.Printf("Failed to send result: %v", err)
-	}
+	// Send ACK - claude started successfully
+	log.Printf("[Task %s] Claude started, sending ACK", task.ID)
+	c.send(Message{
+		Type: MsgTypeAck,
+		ID:   task.ID,
+	})
 
-	// Log for debugging
-	data, _ := json.MarshalIndent(msg, "", "  ")
-	log.Printf("Task %s completed:\n%s", task.ID, string(data))
+	// Wait for completion in background, then send result
+	go func() {
+		defer cancel()
+		result := c.executor.Wait(cmd, stdout, stderr, start)
+
+		msg := Message{
+			Type:     MsgTypeResult,
+			ID:       task.ID,
+			Output:   result.Output,
+			ExitCode: result.ExitCode,
+			Duration: result.DurationMs,
+		}
+
+		log.Printf("[Task %s] Completed: exit=%d, output=%d bytes, duration=%dms",
+			task.ID, result.ExitCode, len(result.Output), result.DurationMs)
+
+		if err := c.send(msg); err != nil {
+			log.Printf("[Task %s] Failed to send result: %v", task.ID, err)
+		} else {
+			log.Printf("[Task %s] Result sent successfully", task.ID)
+		}
+	}()
 }
 
 func truncate(s string, n int) string {

@@ -15,6 +15,7 @@ import (
 const (
 	AgentMsgRegister     = "register"
 	AgentMsgTask         = "task"
+	AgentMsgAck          = "ack"
 	AgentMsgResult       = "result"
 	AgentMsgPing         = "ping"
 	AgentMsgPong         = "pong"
@@ -55,34 +56,45 @@ type Agent struct {
 	connected time.Time
 }
 
-// PendingTask represents a task waiting for a result
-type PendingTask struct {
-	ID       string
-	Agent    string
-	Result   chan AgentMessage
-	Created  time.Time
+// PendingProjectReq represents a request waiting for a project list response
+type PendingProjectReq struct {
+	ID     string
+	Agent  string
+	Result chan AgentMessage
 }
 
-// NotifyFunc is a callback for agent events
+// NotifyFunc is a callback for agent events (connect/disconnect)
 type NotifyFunc func(message string)
+
+// ResultFunc is a callback for agent task results, processed through the AI brain
+type ResultFunc func(message string)
+
+// PendingAck represents a request waiting for a task ack
+type PendingAck struct {
+	Result chan AgentMessage
+}
 
 // AgentHub manages agent connections
 type AgentHub struct {
-	agents   map[string]*Agent
-	tasks    map[string]*PendingTask
-	password string
-	notify   NotifyFunc
-	mu       sync.RWMutex
-	upgrader websocket.Upgrader
+	agents      map[string]*Agent
+	projectReqs map[string]*PendingProjectReq
+	pendingAcks map[string]*PendingAck
+	password    string
+	notify      NotifyFunc
+	onResult    ResultFunc
+	mu          sync.RWMutex
+	upgrader    websocket.Upgrader
 }
 
 // NewAgentHub creates a new agent hub
-func NewAgentHub(password string, notify NotifyFunc) *AgentHub {
+func NewAgentHub(password string, notify NotifyFunc, onResult ResultFunc) *AgentHub {
 	return &AgentHub{
-		agents:   make(map[string]*Agent),
-		tasks:    make(map[string]*PendingTask),
-		password: password,
-		notify:   notify,
+		agents:      make(map[string]*Agent),
+		projectReqs: make(map[string]*PendingProjectReq),
+		pendingAcks: make(map[string]*PendingAck),
+		password:    password,
+		notify:      notify,
+		onResult:    onResult,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -140,17 +152,16 @@ func (h *AgentHub) GetProjects(agentName string, timeout time.Duration) ([]strin
 	resultChan := make(chan AgentMessage, 1)
 
 	h.mu.Lock()
-	h.tasks[reqID] = &PendingTask{
-		ID:      reqID,
-		Agent:   agentName,
-		Result:  resultChan,
-		Created: time.Now(),
+	h.projectReqs[reqID] = &PendingProjectReq{
+		ID:     reqID,
+		Agent:  agentName,
+		Result: resultChan,
 	}
 	h.mu.Unlock()
 
 	defer func() {
 		h.mu.Lock()
-		delete(h.tasks, reqID)
+		delete(h.projectReqs, reqID)
 		h.mu.Unlock()
 	}()
 
@@ -169,49 +180,56 @@ func (h *AgentHub) GetProjects(agentName string, timeout time.Duration) ([]strin
 	}
 }
 
-// SendTask sends a task to an agent and waits for the result
-func (h *AgentHub) SendTask(agentName, prompt, dir string, timeout time.Duration) (*AgentMessage, error) {
+// SendTask sends a task to an agent and waits for acknowledgment that Claude started.
+// Returns the task ID once the agent confirms the process launched.
+// Results will arrive later via handleResult and be sent as Telegram messages.
+func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 	h.mu.RLock()
 	agent, ok := h.agents[agentName]
 	h.mu.RUnlock()
 
 	if !ok {
-		return nil, fmt.Errorf("agent '%s' not found", agentName)
+		return "", fmt.Errorf("agent '%s' not found", agentName)
 	}
 
-	// Create task
 	taskID := fmt.Sprintf("%d", time.Now().UnixNano())
-	resultChan := make(chan AgentMessage, 1)
 
+	// Register pending ack before sending
+	ackChan := make(chan AgentMessage, 1)
 	h.mu.Lock()
-	h.tasks[taskID] = &PendingTask{
-		ID:      taskID,
-		Agent:   agentName,
-		Result:  resultChan,
-		Created: time.Now(),
-	}
+	h.pendingAcks[taskID] = &PendingAck{Result: ackChan}
 	h.mu.Unlock()
 
 	defer func() {
 		h.mu.Lock()
-		delete(h.tasks, taskID)
+		delete(h.pendingAcks, taskID)
 		h.mu.Unlock()
 	}()
 
 	// Send task to agent
-	agent.send <- AgentMessage{
+	msg := AgentMessage{
 		Type:   AgentMsgTask,
 		ID:     taskID,
 		Prompt: prompt,
 		Dir:    dir,
 	}
-
-	// Wait for result
 	select {
-	case result := <-resultChan:
-		return &result, nil
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("task timeout after %v", timeout)
+	case agent.send <- msg:
+		log.Printf("[Agent] Task %s sent to '%s' (dir: %s), waiting for ACK...", taskID, agentName, dir)
+	default:
+		return "", fmt.Errorf("agent '%s' send channel full or closed", agentName)
+	}
+
+	// Wait for ACK (agent confirms Claude started or reports error)
+	select {
+	case ack := <-ackChan:
+		if ack.Error != "" {
+			return "", fmt.Errorf("agent '%s' failed to start task: %s", agentName, ack.Error)
+		}
+		log.Printf("[Agent] Task %s ACK received from '%s' - Claude is running", taskID, agentName)
+		return taskID, nil
+	case <-time.After(30 * time.Second):
+		return "", fmt.Errorf("timeout waiting for agent '%s' to start task (30s)", agentName)
 	}
 }
 
@@ -253,14 +271,52 @@ func (h *AgentHub) unregisterAgent(agent *Agent) {
 	}
 }
 
-func (h *AgentHub) handleResult(msg AgentMessage) {
+func (h *AgentHub) handleResult(agentName string, msg AgentMessage) {
+	log.Printf("[AgentHub] Result from '%s': task=%s, exit=%d, output=%d bytes, error=%q, duration=%dms",
+		agentName, msg.ID, msg.ExitCode, len(msg.Output), msg.Error, msg.Duration)
+
+	if h.onResult == nil {
+		log.Printf("[AgentHub] WARNING: onResult callback is nil, dropping result")
+		return
+	}
+
+	var text string
+	if msg.Error != "" {
+		text = fmt.Sprintf("[AGENT %s] Error: %s", agentName, msg.Error)
+		if msg.Output != "" {
+			text += fmt.Sprintf("\n\nOutput:\n%s", truncateText(msg.Output, 3500))
+		}
+	} else if msg.Output != "" {
+		text = fmt.Sprintf("[AGENT %s]\n%s", agentName, truncateText(msg.Output, 3800))
+	} else {
+		text = fmt.Sprintf("[AGENT %s] Task completed (no output)", agentName)
+	}
+
+	log.Printf("[AgentHub] Forwarding result to onResult callback (%d bytes)", len(text))
+	h.onResult(text)
+}
+
+func (h *AgentHub) handleAck(msg AgentMessage) {
 	h.mu.RLock()
-	task, ok := h.tasks[msg.ID]
+	pending, ok := h.pendingAcks[msg.ID]
 	h.mu.RUnlock()
 
 	if ok {
 		select {
-		case task.Result <- msg:
+		case pending.Result <- msg:
+		default:
+		}
+	}
+}
+
+func (h *AgentHub) handleProjectsResult(msg AgentMessage) {
+	h.mu.RLock()
+	req, ok := h.projectReqs[msg.ID]
+	h.mu.RUnlock()
+
+	if ok {
+		select {
+		case req.Result <- msg:
 		default:
 		}
 	}
@@ -300,8 +356,14 @@ func (a *Agent) readPump() {
 				return
 			}
 
-		case AgentMsgResult, AgentMsgProjects:
-			a.hub.handleResult(msg)
+		case AgentMsgAck:
+			a.hub.handleAck(msg)
+
+		case AgentMsgResult:
+			a.hub.handleResult(a.Name, msg)
+
+		case AgentMsgProjects:
+			a.hub.handleProjectsResult(msg)
 
 		case AgentMsgPing:
 			// Respond with pong
@@ -417,24 +479,12 @@ func ExecuteAgentTool(hub *AgentHub, name, arguments string) (string, error) {
 			return "", fmt.Errorf("invalid arguments: %w", err)
 		}
 
-		result, err := hub.SendTask(args.Agent, args.Prompt, args.Dir, 60*time.Minute)
+		_, err := hub.SendTask(args.Agent, args.Prompt, args.Dir)
 		if err != nil {
 			return "", err
 		}
 
-		if result == nil {
-			return "Agent returned no result", nil
-		}
-
-		if result.Error != "" {
-			return fmt.Sprintf("Error: %s\n\nOutput:\n%s", result.Error, result.Output), nil
-		}
-
-		if result.Output == "" {
-			return "Task completed successfully (no output)", nil
-		}
-
-		return result.Output, nil
+		return fmt.Sprintf("OK. Claude is running on agent '%s'.", args.Agent), nil
 
 	default:
 		return "", fmt.Errorf("unknown agent tool: %s", name)

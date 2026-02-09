@@ -5,7 +5,7 @@
 Go monolith deployed to VPS (51.254.142.231) via `scp` + `systemctl restart minerva`.
 Reverse proxy: Caddy at `/etc/caddy/Caddyfile`, domain: `home.jairo.cloud` -> `localhost:8081`.
 
-- **AI Backend**: Claude CLI (`claude -p`)
+- **AI Backend**: Claude CLI (`claude -p --continue --dangerously-skip-permissions`)
 - **Database**: SQLite at configured `DATABASE_PATH`
 - **Server Port**: 8081 (env: `WEBHOOK_PORT`)
 - **Telegram Bot**: Long-polling, single admin user
@@ -13,13 +13,31 @@ Reverse proxy: Caddy at `/etc/caddy/Caddyfile`, domain: `home.jairo.cloud` -> `l
 ## Build & Deploy
 
 ```bash
-# Build for VPS
-GOOS=linux GOARCH=amd64 go build -o /tmp/minerva-server .
+# Build server for VPS (MUST run from repo root /Users/jairo/minerva, NOT from agent/ subdir)
+cd /Users/jairo/minerva && GOOS=linux GOARCH=amd64 go build -o /tmp/minerva-server .
 
-# Deploy
+# Deploy server
 scp /tmp/minerva-server ubuntu@51.254.142.231:/tmp/minerva-server
-ssh ubuntu@51.254.142.231 'sudo cp /tmp/minerva-server /home/ubuntu/minerva && sudo systemctl restart minerva'
+ssh ubuntu@51.254.142.231 'sudo systemctl stop minerva && sudo cp /tmp/minerva-server /home/ubuntu/minerva && sudo systemctl start minerva'
+
+# Build Mac agent (separate binary, different package)
+cd /Users/jairo/minerva/agent && go build -o /Users/jairo/minerva/agent/minerva-agent .
+
+# Restart Mac agent (managed by launchd, do NOT launch manually with nohup)
+launchctl unload ~/Library/LaunchAgents/com.minerva.agent.plist
+launchctl load ~/Library/LaunchAgents/com.minerva.agent.plist
+# Logs: /tmp/minerva-agent.log
+# Config: ~/Library/LaunchAgents/com.minerva.agent.plist
+# Script: /Users/jairo/minerva/agent/run-agent.sh
 ```
+
+**CRITICAL: Building from wrong directory deploys the wrong binary and breaks the bot.**
+This has happened multiple times. The `cd` before `go build` is NOT optional.
+- Server: `cd /Users/jairo/minerva && go build .` (root) → deploys to VPS
+- Agent: `cd /Users/jairo/minerva/agent && go build .` → runs locally via launchd
+- VPS agent: same source as Mac agent, build with `cd /Users/jairo/minerva/agent && GOOS=linux GOARCH=amd64 go build -o /tmp/minerva-agent .`
+- **Always verify** after deploy: `sudo journalctl -u minerva -n 5` must show `server.go` and `webhook.go` lines, NOT `client.go`
+- If you see `client.go` in server logs → you deployed the agent binary as the server. Rebuild from root.
 
 ## Environment Variables (.env)
 
@@ -61,8 +79,13 @@ minerva agent run <name> "prompt" [--dir /path]            # Run task on agent
 
 ## AI Brain (Claude CLI)
 
-The AI brain runs as `claude -p --dangerously-skip-permissions --output-format text` in `./workspace`.
+The AI brain runs as `claude -p --continue --dangerously-skip-permissions --output-format text` in `./workspace`.
 Claude CLI reads `workspace/CLAUDE.md` automatically, which contains all tool instructions.
+
+**CRITICAL**: The `--continue` flag is **mandatory**. Without it, each invocation is a fresh
+session with no memory of previous tool calls, causing Claude to fabricate responses instead
+of actually executing commands. With `--continue`, Claude maintains conversation state and
+can see the real outputs of its previous Bash tool executions.
 
 **Important**: Claude CLI cannot use custom tool definitions (ToolCalls). Instead, all Minerva
 tools are exposed as CLI commands that Claude executes via its built-in Bash tool.

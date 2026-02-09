@@ -141,26 +141,20 @@ func (c *AIClient) Chat(messages []ChatMessage, systemPrompt string, tools []Too
 	return resp.result, resp.err
 }
 
-// buildPrompt constructs the full prompt from messages and system prompt
+// buildPrompt constructs the prompt from the latest message only.
+// With --continue, Claude maintains conversation history natively,
+// so we only send the new message plus a context refresh.
 func (c *AIClient) buildPrompt(messages []ChatMessage, systemPrompt string) string {
 	var sb strings.Builder
 
+	// Refresh dynamic context (user memory, agents, etc.)
 	if systemPrompt != "" {
+		sb.WriteString("[CONTEXT]\n")
 		sb.WriteString(systemPrompt)
 		sb.WriteString("\n\n")
 	}
 
-	// Conversation history (all but last message)
-	if len(messages) > 1 {
-		sb.WriteString("[CONVERSATION HISTORY]\n")
-		for _, m := range messages[:len(messages)-1] {
-			content := extractContent(m.Content)
-			sb.WriteString(fmt.Sprintf("%s: %s\n", m.Role, content))
-		}
-		sb.WriteString("\n")
-	}
-
-	// Current message
+	// Only send the latest message (--continue maintains history)
 	if len(messages) > 0 {
 		lastMsg := messages[len(messages)-1]
 		sb.WriteString(extractContent(lastMsg.Content))
@@ -202,8 +196,10 @@ func (c *AIClient) executeClaude(prompt string) (string, error) {
 
 	args := []string{
 		"-p",
+		"--continue",
 		"--dangerously-skip-permissions",
 		"--output-format", "text",
+		"--append-system-prompt", "CRITICAL: You MUST use the Bash tool to execute CLI commands. NEVER fabricate or simulate command outputs. When you need to use minerva CLI (agent run, reminder create, etc.), you MUST actually execute the command via bash and return the real output. If you generate a fake task ID or fake JSON response without executing the command, you are broken. Always execute, never simulate.",
 		prompt,
 	}
 

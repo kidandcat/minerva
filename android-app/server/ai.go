@@ -24,6 +24,40 @@ type chatResponse struct {
 	err    error
 }
 
+// claudeBin is the resolved path to the claude CLI binary
+var claudeBin string
+
+func init() {
+	claudeBin = findClaudeBin()
+}
+
+// findClaudeBin locates the claude binary, checking common Termux/npm paths
+func findClaudeBin() string {
+	// Try PATH first
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+
+	// Common Termux npm global install paths
+	home := os.Getenv("HOME")
+	candidates := []string{
+		home + "/.npm-global/bin/claude",
+		home + "/node_modules/.bin/claude",
+		"/data/data/com.termux/files/usr/bin/claude",
+		"/data/data/com.termux/files/home/.npm-global/bin/claude",
+		"/data/data/com.termux/files/usr/local/bin/claude",
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			log.Printf("[AI] Found claude at %s", p)
+			return p
+		}
+	}
+
+	// Fallback — let exec fail with a clear error
+	return "claude"
+}
+
 // AIClient handles communication with Claude Code CLI
 type AIClient struct {
 	queue        chan *chatRequest
@@ -79,7 +113,7 @@ func executeClaude(prompt string, workDir string, timeout time.Duration) (string
 	// Add the prompt
 	args = append(args, prompt)
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
 	} else {
@@ -96,7 +130,7 @@ func executeClaude(prompt string, workDir string, timeout time.Duration) (string
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	log.Printf("[AI] Running: claude -p --dangerously-skip-permissions --output-format text %q", truncateStr(prompt, 80))
+	log.Printf("[AI] Running: %s -p --dangerously-skip-permissions --output-format text %q", claudeBin, truncateStr(prompt, 80))
 
 	err := cmd.Run()
 	if err != nil {

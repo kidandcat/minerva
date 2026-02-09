@@ -50,6 +50,7 @@ func (b *Bot) Start() {
 	commands := tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "start", Description: "Mostrar bienvenida y ayuda"},
 		tgbotapi.BotCommand{Command: "reminders", Description: "Ver recordatorios pendientes"},
+		tgbotapi.BotCommand{Command: "clear", Description: "Limpiar contexto de conversación"},
 		tgbotapi.BotCommand{Command: "token", Description: "Actualizar OAuth token de Claude"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
@@ -412,6 +413,8 @@ func (b *Bot) handleCommand(update tgbotapi.Update) error {
 	switch command {
 	case "reminders":
 		return b.handleReminders(msg, user)
+	case "clear":
+		return b.handleClear(msg, user)
 	case "token":
 		return b.handleToken(msg, args)
 	default:
@@ -426,9 +429,23 @@ Envíame un mensaje para chatear.
 
 *Comandos:*
 /reminders - Ver recordatorios pendientes
+/clear - Limpiar contexto de conversación
 /token <token> - Actualizar OAuth token de Claude`
 
 	return b.sendMessage(msg.Chat.ID, welcome)
+}
+
+func (b *Bot) handleClear(msg *tgbotapi.Message, user *User) error {
+	conv, err := b.db.GetActiveConversation(user.ID)
+	if err != nil {
+		return b.sendMessage(msg.Chat.ID, "Error al obtener conversación.")
+	}
+
+	if err := b.db.ClearConversationMessages(conv.ID); err != nil {
+		return b.sendMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err))
+	}
+
+	return b.sendMessage(msg.Chat.ID, "Contexto limpiado.")
 }
 
 func (b *Bot) handleToken(msg *tgbotapi.Message, args string) error {
