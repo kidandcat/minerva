@@ -179,10 +179,10 @@ adb shell "am start -n com.minerva.bridge/.MainActivity"
 
 ```
 TELEGRAM_BOT_TOKEN=...
-ADMIN_ID=282611642
+ADMIN_ID=<YOUR_TELEGRAM_USER_ID>
 DATABASE_PATH=/data/data/com.termux/files/home/minerva-data/minerva.db
 GOOGLE_API_KEY=...          # For Gemini Live voice
-RELAY_URL=https://minerva-relay.fly.dev
+RELAY_URL=<YOUR_RELAY_URL>
 RELAY_KEY=...
 MINERVA_WORKSPACE=/data/data/com.termux/files/home/workspace
 RESEND_API_KEY=...          # For email
