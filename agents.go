@@ -137,6 +137,16 @@ func (h *AgentHub) ListAgents() []map[string]any {
 	return list
 }
 
+// GetAgentCwd returns the working directory of a connected agent
+func (h *AgentHub) GetAgentCwd(agentName string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if agent, ok := h.agents[agentName]; ok {
+		return agent.Cwd
+	}
+	return ""
+}
+
 // GetProjects requests the current project list from an agent
 func (h *AgentHub) GetProjects(agentName string, timeout time.Duration) ([]string, error) {
 	h.mu.RLock()

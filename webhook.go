@@ -277,10 +277,11 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 
 	// Notify admin that agent started
 	if w.bot != nil && w.bot.config.AdminID != 0 {
-		notification := fmt.Sprintf("⚡ *Agent '%s'*\n*Prompt:* %s", req.Agent, req.Prompt)
-		if req.Dir != "" {
-			notification += fmt.Sprintf("\n*Dir:* `%s`", req.Dir)
+		dir := req.Dir
+		if dir == "" {
+			dir = w.agentHub.GetAgentCwd(req.Agent)
 		}
+		notification := fmt.Sprintf("⚡ Agent launched on %s:%s", req.Agent, dir)
 		w.bot.sendMessage(w.bot.config.AdminID, notification)
 	}
 
