@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -89,7 +91,9 @@ func (c *Client) Run() error {
 			continue
 		}
 
+		log.Printf("Connected to server")
 		c.handleMessages()
+		log.Printf("Disconnected, will reconnect...")
 	}
 }
 
@@ -104,11 +108,18 @@ func (c *Client) Close() {
 }
 
 func (c *Client) connect() error {
-	header := make(map[string][]string)
-	if c.password != "" {
-		header["Authorization"] = []string{"Bearer " + c.password}
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 15 * time.Second,
+		NetDial: (&net.Dialer{
+			Timeout: 10 * time.Second,
+		}).Dial,
 	}
-	conn, _, err := websocket.DefaultDialer.Dial(c.serverURL, header)
+
+	header := make(http.Header)
+	if c.password != "" {
+		header.Set("Authorization", "Bearer "+c.password)
+	}
+	conn, _, err := dialer.Dial(c.serverURL, header)
 	if err != nil {
 		return err
 	}
@@ -134,21 +145,36 @@ func (c *Client) send(msg Message) error {
 	if c.conn == nil {
 		return nil
 	}
+	c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return c.conn.WriteJSON(msg)
 }
 
+// closeConn closes the current connection (safe to call multiple times)
+func (c *Client) closeConn() {
+	c.connLock.Lock()
+	defer c.connLock.Unlock()
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+}
+
 func (c *Client) handleMessages() {
+	stopPing := make(chan struct{})
 	defer func() {
-		c.connLock.Lock()
-		if c.conn != nil {
-			c.conn.Close()
-			c.conn = nil
-		}
-		c.connLock.Unlock()
+		close(stopPing)
+		c.closeConn()
 	}()
 
-	// Start ping ticker
-	go c.pingLoop()
+	// Set up pong handler to reset read deadline (handles WebSocket protocol pongs)
+	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	// Start ping ticker - when it fails, it closes the connection to unblock ReadJSON
+	go c.pingLoop(stopPing)
 
 	for {
 		select {
@@ -162,6 +188,9 @@ func (c *Client) handleMessages() {
 			log.Printf("Read error: %v", err)
 			return
 		}
+
+		// Reset read deadline on any application message
+		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		switch msg.Type {
 		case MsgTypeTask:
@@ -178,16 +207,38 @@ func (c *Client) handleMessages() {
 	}
 }
 
-func (c *Client) pingLoop() {
-	ticker := time.NewTicker(30 * time.Second)
+func (c *Client) pingLoop(stop chan struct{}) {
+	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-c.done:
 			return
+		case <-stop:
+			return
 		case <-ticker.C:
+			c.connLock.Lock()
+			if c.conn == nil {
+				c.connLock.Unlock()
+				return
+			}
+			// Send WebSocket protocol-level ping (keeps proxies alive)
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			err := c.conn.WriteMessage(websocket.PingMessage, nil)
+			c.connLock.Unlock()
+
+			if err != nil {
+				log.Printf("Ping failed: %v, closing connection", err)
+				// Close connection to unblock ReadJSON in handleMessages
+				c.closeConn()
+				return
+			}
+
+			// Also send application-level ping
 			if err := c.send(Message{Type: MsgTypePing}); err != nil {
+				log.Printf("Application ping failed: %v, closing connection", err)
+				c.closeConn()
 				return
 			}
 		}
@@ -223,10 +274,12 @@ func (c *Client) handleTask(task Message) {
 
 	// Send ACK - claude started successfully
 	log.Printf("[Task %s] Claude started, sending ACK", task.ID)
-	c.send(Message{
+	if err := c.send(Message{
 		Type: MsgTypeAck,
 		ID:   task.ID,
-	})
+	}); err != nil {
+		log.Printf("[Task %s] WARNING: Failed to send ACK: %v", task.ID, err)
+	}
 
 	// Wait for completion in background, then send result
 	go func() {

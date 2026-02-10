@@ -78,25 +78,27 @@ type PendingAck struct {
 
 // AgentHub manages agent connections
 type AgentHub struct {
-	agents      map[string]*Agent
-	projectReqs map[string]*PendingProjectReq
-	pendingAcks map[string]*PendingAck
-	password    string
-	notify      NotifyFunc
-	onResult    ResultFunc
-	mu          sync.RWMutex
-	upgrader    websocket.Upgrader
+	agents         map[string]*Agent
+	projectReqs    map[string]*PendingProjectReq
+	pendingAcks    map[string]*PendingAck
+	disconnTimers  map[string]*time.Timer // debounce disconnect notifications
+	password       string
+	notify         NotifyFunc
+	onResult       ResultFunc
+	mu             sync.RWMutex
+	upgrader       websocket.Upgrader
 }
 
 // NewAgentHub creates a new agent hub
 func NewAgentHub(password string, notify NotifyFunc, onResult ResultFunc) *AgentHub {
 	return &AgentHub{
-		agents:      make(map[string]*Agent),
-		projectReqs: make(map[string]*PendingProjectReq),
-		pendingAcks: make(map[string]*PendingAck),
-		password:    password,
-		notify:      notify,
-		onResult:    onResult,
+		agents:        make(map[string]*Agent),
+		projectReqs:   make(map[string]*PendingProjectReq),
+		pendingAcks:   make(map[string]*PendingAck),
+		disconnTimers: make(map[string]*time.Timer),
+		password:      password,
+		notify:        notify,
+		onResult:      onResult,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -279,7 +281,12 @@ func (h *AgentHub) registerAgent(agent *Agent, password string) bool {
 	h.agents[agent.Name] = agent
 	log.Printf("Agent '%s' connected from %s", agent.Name, agent.Cwd)
 
-	if h.notify != nil {
+	// Cancel pending disconnect notification (agent reconnected quickly)
+	if timer, ok := h.disconnTimers[agent.Name]; ok {
+		timer.Stop()
+		delete(h.disconnTimers, agent.Name)
+		// Silent reconnect - no notifications
+	} else if h.notify != nil {
 		h.notify(fmt.Sprintf("🟢 Agent '%s' connected", agent.Name))
 	}
 	return true
@@ -287,16 +294,28 @@ func (h *AgentHub) registerAgent(agent *Agent, password string) bool {
 
 func (h *AgentHub) unregisterAgent(agent *Agent) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 
 	if existing, ok := h.agents[agent.Name]; ok && existing == agent {
 		delete(h.agents, agent.Name)
 		log.Printf("Agent '%s' disconnected", agent.Name)
 
+		// Debounce: wait 10s before notifying, in case agent reconnects quickly
+		name := agent.Name
 		if h.notify != nil {
-			h.notify(fmt.Sprintf("🔴 Agent '%s' disconnected", agent.Name))
+			h.disconnTimers[name] = time.AfterFunc(10*time.Second, func() {
+				h.mu.Lock()
+				delete(h.disconnTimers, name)
+				// Only notify if agent is still disconnected
+				_, reconnected := h.agents[name]
+				h.mu.Unlock()
+				if !reconnected {
+					h.notify(fmt.Sprintf("🔴 Agent '%s' disconnected", name))
+				}
+			})
 		}
 	}
+
+	h.mu.Unlock()
 }
 
 func (h *AgentHub) handleResult(agentName string, msg AgentMessage) {
@@ -411,7 +430,7 @@ func (a *Agent) readPump() {
 }
 
 func (a *Agent) writePump() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(25 * time.Second)
 	defer func() {
 		ticker.Stop()
 		a.conn.Close()
@@ -430,6 +449,12 @@ func (a *Agent) writePump() {
 			}
 
 		case <-ticker.C:
+			// Send WebSocket protocol ping (keeps proxies/LBs alive)
+			a.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := a.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+			// Also send application-level ping
 			a.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := a.conn.WriteJSON(AgentMessage{Type: AgentMsgPing}); err != nil {
 				return
