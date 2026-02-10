@@ -62,6 +62,10 @@ minerva phone list                                         # List connected Andr
 minerva phone call <number> "purpose"                      # Call via Android phone bridge
 minerva agent list                                         # List connected agents
 minerva agent run <name> "prompt" [--dir /path]            # Run task on agent
+minerva schedule create "task" --at "time" --agent name [--dir /path] [--recurring daily|weekly|monthly]
+minerva schedule list                                      # List scheduled tasks
+minerva schedule delete <id>                               # Delete scheduled task
+minerva schedule run <id>                                  # Manually trigger task
 ```
 
 ## AI Brain (Claude CLI)
@@ -123,6 +127,7 @@ Status flow: `pending` -> `fired` -> `done`
 | `twilio.go` | Twilio ConversationRelay |
 | `webhook.go` | HTTP webhook handlers |
 | `agents.go` | Agent hub (remote Claude Code) |
+| `schedule.go` | Scheduled task system (autonomous execution) |
 | `relay_client.go` | Encrypted relay client |
 | `task_runner.go` | Background task management |
 | `tools/` | Tool implementations (email, reminder, memory, code, notes) |

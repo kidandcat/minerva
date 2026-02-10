@@ -90,6 +90,29 @@ You can send emails via Resend.
 minerva email send <to> --subject "subject" --body "body"
 ```
 
+### Scheduled Tasks (autonomous execution)
+
+Schedule tasks to run automatically at specific times on connected agents. Tasks execute via the agent system and results are sent via Telegram.
+
+```bash
+# Schedule a task for a specific time
+minerva schedule create "Deploy vesper to production" --at "2026-02-10T18:00:00+01:00" --agent mac --dir ~/vesper
+
+# Schedule a recurring daily backup
+minerva schedule create "Backup database" --at "2026-02-11T00:00:00+01:00" --agent vps --recurring daily
+
+# List active scheduled tasks
+minerva schedule list
+
+# Delete a scheduled task
+minerva schedule delete <id>
+
+# Manually trigger a pending task (runs on next scheduler tick)
+minerva schedule run <id>
+```
+
+**Recurring options:** `daily`, `weekly`, `monthly` (or omit for one-time tasks)
+
 ## Instructions
 
 1. **Reminders**: When user asks to remind them about something, use `minerva reminder create`. When a `[REMINDER FIRED]` message arrives, always notify the user and decide autonomously whether to reschedule it for later using `minerva reminder reschedule`. NEVER dismiss reminders yourself - only the user can do that.
@@ -99,6 +122,7 @@ minerva email send <to> --subject "subject" --body "body"
 5. **Context**: Use `minerva context` if you need to see conversation history
 6. **Phone Calls**: When user asks you to call somewhere, use `minerva call` with clear instructions.
 7. **Email**: When user asks you to send an email, use `minerva email send` with the recipient, subject, and body.
+8. **Scheduled Tasks**: When user wants to schedule automated work (deployments, backups, maintenance), use `minerva schedule create` with the task description, time, and target agent.
 
 ## Role Separation
 

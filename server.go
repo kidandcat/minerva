@@ -22,6 +22,7 @@ type ServerState struct {
 	phoneBridge    *PhoneBridge
 	webhook        *WebhookServer
 	relayClient    *RelayClient
+	scheduler      *Scheduler
 	stopReminders  chan struct{}
 	mu             sync.Mutex
 	running        bool
@@ -48,6 +49,12 @@ func StartServer(config *Config) error {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 	log.Println("Database initialized")
+
+	// Initialize schedule table
+	if err := db.InitScheduleTable(); err != nil {
+		db.Close()
+		return fmt.Errorf("failed to initialize schedule table: %w", err)
+	}
 
 	// Initialize email
 	if config.ResendAPIKey != "" {
@@ -122,6 +129,10 @@ func StartServer(config *Config) error {
 			}
 		}
 	}()
+
+	// Start scheduler for scheduled tasks
+	state.scheduler = NewScheduler(db, bot, bot.agentHub)
+	state.scheduler.Start()
 
 	// Initialize Twilio
 	if config.TwilioAccountSID != "" && config.TwilioAuthToken != "" {
@@ -207,6 +218,9 @@ func StopServer() {
 
 	// Stop components
 	close(serverState.stopReminders)
+	if serverState.scheduler != nil {
+		serverState.scheduler.Stop()
+	}
 	serverState.bot.Stop()
 
 	if serverState.relayClient != nil {

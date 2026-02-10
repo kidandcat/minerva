@@ -139,6 +139,8 @@ func runCLI() {
 		handlePhoneCLI(config, args)
 	case "file":
 		handleFileCLI(config, args)
+	case "schedule":
+		handleScheduleCLI(db, args)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command: %s\n", cmd)
 		printUsage()
@@ -166,6 +168,10 @@ Usage:
   minerva phone list                   List connected Android phones
   minerva phone call <number> "purpose"  Make a call via Android phone
   minerva file send <path> ["caption"]  Send a file to admin via Telegram
+  minerva schedule create "task" --at "time" [--agent name] [--dir /path] [--recurring daily|weekly|monthly]
+  minerva schedule list                List active scheduled tasks
+  minerva schedule delete <id>         Delete a scheduled task
+  minerva schedule run <id>            Manually trigger a scheduled task
   minerva help                         Show this help message`)
 }
 
@@ -709,6 +715,180 @@ func handleFileCLI(config *Config, args []string) {
 		"file_size": info.Size(),
 	})
 	fmt.Println(string(result))
+}
+
+func handleScheduleCLI(db *DB, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "error: schedule subcommand required (create, list, delete, run)\n")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "create":
+		if len(subargs) < 3 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva schedule create \"task description\" --at \"2026-02-10T16:00:00+01:00\" [--agent name] [--dir /path] [--recurring daily|weekly|monthly]\n")
+			os.Exit(1)
+		}
+		description := subargs[0]
+		var scheduledAt, agentName, workingDir, recurring string
+		for i, arg := range subargs {
+			switch arg {
+			case "--at":
+				if i+1 < len(subargs) {
+					scheduledAt = subargs[i+1]
+				}
+			case "--agent":
+				if i+1 < len(subargs) {
+					agentName = subargs[i+1]
+				}
+			case "--dir":
+				if i+1 < len(subargs) {
+					workingDir = subargs[i+1]
+				}
+			case "--recurring":
+				if i+1 < len(subargs) {
+					recurring = subargs[i+1]
+				}
+			}
+		}
+		if scheduledAt == "" {
+			fmt.Fprintf(os.Stderr, "error: --at flag is required\n")
+			os.Exit(1)
+		}
+		if agentName == "" {
+			fmt.Fprintf(os.Stderr, "error: --agent flag is required\n")
+			os.Exit(1)
+		}
+
+		t, err := time.Parse(time.RFC3339, scheduledAt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid time format, use ISO8601 (e.g., 2026-02-10T16:00:00+01:00): %v\n", err)
+			os.Exit(1)
+		}
+		if t.Before(time.Now()) {
+			fmt.Fprintf(os.Stderr, "error: scheduled time must be in the future\n")
+			os.Exit(1)
+		}
+		if recurring != "" && recurring != "none" && recurring != "daily" && recurring != "weekly" && recurring != "monthly" {
+			fmt.Fprintf(os.Stderr, "error: recurring must be one of: none, daily, weekly, monthly\n")
+			os.Exit(1)
+		}
+
+		id, err := db.CreateScheduledTask(description, t, agentName, workingDir, recurring)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		result, _ := json.Marshal(map[string]any{
+			"success":      true,
+			"id":           id,
+			"description":  description,
+			"scheduled_at": t.Format(time.RFC3339),
+			"agent":        agentName,
+			"dir":          workingDir,
+			"recurring":    recurring,
+			"message":      fmt.Sprintf("Task scheduled for %s", t.Format("Jan 2, 2006 at 15:04")),
+		})
+		fmt.Println(string(result))
+
+	case "list":
+		tasks, err := db.GetScheduledTasks()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		type taskResult struct {
+			ID          int64  `json:"id"`
+			Description string `json:"description"`
+			ScheduledAt string `json:"scheduled_at"`
+			Agent       string `json:"agent"`
+			Dir         string `json:"dir,omitempty"`
+			Status      string `json:"status"`
+			Recurring   string `json:"recurring"`
+		}
+
+		var results []taskResult
+		for _, t := range tasks {
+			results = append(results, taskResult{
+				ID:          t.ID,
+				Description: t.Description,
+				ScheduledAt: t.ScheduledAt.Format(time.RFC3339),
+				Agent:       t.AgentName,
+				Dir:         t.WorkingDir,
+				Status:      t.Status,
+				Recurring:   t.Recurring,
+			})
+		}
+
+		response, _ := json.Marshal(map[string]any{
+			"success": true,
+			"tasks":   results,
+			"count":   len(results),
+		})
+		fmt.Println(string(response))
+
+	case "delete":
+		if len(subargs) < 1 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva schedule delete <id>\n")
+			os.Exit(1)
+		}
+		id, err := strconv.ParseInt(subargs[0], 10, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid task ID: %v\n", err)
+			os.Exit(1)
+		}
+		if err := db.DeleteScheduledTask(id); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		result, _ := json.Marshal(map[string]any{
+			"success": true,
+			"message": "Scheduled task deleted",
+		})
+		fmt.Println(string(result))
+
+	case "run":
+		if len(subargs) < 1 {
+			fmt.Fprintf(os.Stderr, "error: usage: minerva schedule run <id>\n")
+			os.Exit(1)
+		}
+		id, err := strconv.ParseInt(subargs[0], 10, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid task ID: %v\n", err)
+			os.Exit(1)
+		}
+
+		task, err := db.GetScheduledTask(id)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: task not found: %v\n", err)
+			os.Exit(1)
+		}
+		if task.Status != "pending" {
+			fmt.Fprintf(os.Stderr, "error: task is not in pending status (current: %s)\n", task.Status)
+			os.Exit(1)
+		}
+
+		// Set scheduled_at to now so the scheduler picks it up on next tick
+		if err := db.RescheduleTask(id, time.Now().Add(-1*time.Second)); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		result, _ := json.Marshal(map[string]any{
+			"success": true,
+			"message": "Task will execute on next scheduler tick (within 1 minute)",
+		})
+		fmt.Println(string(result))
+
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown schedule subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
 }
 
 // runBot runs the main Telegram bot
