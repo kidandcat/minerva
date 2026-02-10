@@ -104,7 +104,11 @@ func (c *Client) Close() {
 }
 
 func (c *Client) connect() error {
-	conn, _, err := websocket.DefaultDialer.Dial(c.serverURL, nil)
+	header := make(map[string][]string)
+	if c.password != "" {
+		header["Authorization"] = []string{"Bearer " + c.password}
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(c.serverURL, header)
 	if err != nil {
 		return err
 	}
