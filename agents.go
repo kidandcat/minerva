@@ -47,13 +47,14 @@ type AgentMessage struct {
 
 // Agent represents a connected agent
 type Agent struct {
-	Name      string
-	Cwd       string
-	Projects  []string
-	conn      *websocket.Conn
-	hub       *AgentHub
-	send      chan AgentMessage
-	connected time.Time
+	Name        string
+	Cwd         string
+	Projects    []string
+	conn        *websocket.Conn
+	hub         *AgentHub
+	send        chan AgentMessage
+	connected   time.Time
+	activeTasks sync.Map // taskID -> time.Time (start time)
 }
 
 // PendingProjectReq represents a request waiting for a project list response
@@ -112,7 +113,7 @@ func (h *AgentHub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	agent := &Agent{
 		conn:      conn,
 		hub:       h,
-		send:      make(chan AgentMessage, 10),
+		send:      make(chan AgentMessage, 64),
 		connected: time.Now(),
 	}
 
@@ -127,11 +128,17 @@ func (h *AgentHub) ListAgents() []map[string]any {
 
 	list := make([]map[string]any, 0, len(h.agents))
 	for name, agent := range h.agents {
+		taskCount := 0
+		agent.activeTasks.Range(func(_, _ any) bool {
+			taskCount++
+			return true
+		})
 		list = append(list, map[string]any{
-			"name":      name,
-			"cwd":       agent.Cwd,
-			"projects":  agent.Projects,
-			"connected": agent.connected.Format(time.RFC3339),
+			"name":         name,
+			"cwd":          agent.Cwd,
+			"projects":     agent.Projects,
+			"connected":    agent.connected.Format(time.RFC3339),
+			"active_tasks": taskCount,
 		})
 	}
 	return list
@@ -193,6 +200,7 @@ func (h *AgentHub) GetProjects(agentName string, timeout time.Duration) ([]strin
 // SendTask sends a task to an agent and waits for acknowledgment that Claude started.
 // Returns the task ID once the agent confirms the process launched.
 // Results will arrive later via handleResult and be sent as Telegram messages.
+// Multiple tasks can run concurrently on the same agent.
 func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 	h.mu.RLock()
 	agent, ok := h.agents[agentName]
@@ -204,17 +212,20 @@ func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 
 	taskID := fmt.Sprintf("%d", time.Now().UnixNano())
 
+	// Track active task on this agent
+	agent.activeTasks.Store(taskID, time.Now())
+
 	// Register pending ack before sending
 	ackChan := make(chan AgentMessage, 1)
 	h.mu.Lock()
 	h.pendingAcks[taskID] = &PendingAck{Result: ackChan}
 	h.mu.Unlock()
 
-	defer func() {
+	cleanup := func() {
 		h.mu.Lock()
 		delete(h.pendingAcks, taskID)
 		h.mu.Unlock()
-	}()
+	}
 
 	// Send task to agent
 	msg := AgentMessage{
@@ -227,18 +238,24 @@ func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 	case agent.send <- msg:
 		log.Printf("[Agent] Task %s sent to '%s' (dir: %s), waiting for ACK...", taskID, agentName, dir)
 	default:
-		return "", fmt.Errorf("agent '%s' send channel full or closed", agentName)
+		cleanup()
+		agent.activeTasks.Delete(taskID)
+		return "", fmt.Errorf("agent '%s' send channel full", agentName)
 	}
 
 	// Wait for ACK (agent confirms Claude started or reports error)
 	select {
 	case ack := <-ackChan:
+		cleanup()
 		if ack.Error != "" {
+			agent.activeTasks.Delete(taskID)
 			return "", fmt.Errorf("agent '%s' failed to start task: %s", agentName, ack.Error)
 		}
 		log.Printf("[Agent] Task %s ACK received from '%s' - Claude is running", taskID, agentName)
 		return taskID, nil
 	case <-time.After(30 * time.Second):
+		cleanup()
+		agent.activeTasks.Delete(taskID)
 		return "", fmt.Errorf("timeout waiting for agent '%s' to start task (30s)", agentName)
 	}
 }
@@ -284,6 +301,13 @@ func (h *AgentHub) unregisterAgent(agent *Agent) {
 func (h *AgentHub) handleResult(agentName string, msg AgentMessage) {
 	log.Printf("[AgentHub] Result from '%s': task=%s, exit=%d, output=%d bytes, error=%q, duration=%dms",
 		agentName, msg.ID, msg.ExitCode, len(msg.Output), msg.Error, msg.Duration)
+
+	// Remove from active tasks
+	h.mu.RLock()
+	if agent, ok := h.agents[agentName]; ok {
+		agent.activeTasks.Delete(msg.ID)
+	}
+	h.mu.RUnlock()
 
 	if h.onResult == nil {
 		log.Printf("[AgentHub] WARNING: onResult callback is nil, dropping result")

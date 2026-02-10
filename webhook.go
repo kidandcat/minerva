@@ -211,6 +211,7 @@ func (w *WebhookServer) handleAgentList(rw http.ResponseWriter, r *http.Request)
 	for _, agent := range agents {
 		name, _ := agent["name"].(string)
 		workDir, _ := agent["cwd"].(string)
+		activeTasks, _ := agent["active_tasks"].(int)
 		if name == "" {
 			continue
 		}
@@ -219,14 +220,16 @@ func (w *WebhookServer) handleAgentList(rw http.ResponseWriter, r *http.Request)
 		projects, err := w.agentHub.GetProjects(name, 5*time.Second)
 		if err != nil {
 			result[name] = map[string]interface{}{
-				"workDir":  workDir,
-				"projects": []string{},
-				"error":    err.Error(),
+				"workDir":      workDir,
+				"projects":     []string{},
+				"active_tasks": activeTasks,
+				"error":        err.Error(),
 			}
 		} else {
 			result[name] = map[string]interface{}{
-				"workDir":  workDir,
-				"projects": projects,
+				"workDir":      workDir,
+				"projects":     projects,
+				"active_tasks": activeTasks,
 			}
 		}
 	}
@@ -264,7 +267,7 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	_, err := w.agentHub.SendTask(req.Agent, req.Prompt, req.Dir)
+	taskID, err := w.agentHub.SendTask(req.Agent, req.Prompt, req.Dir)
 	if err != nil {
 		log.Printf("[Agent] Failed to send task to '%s': %v", req.Agent, err)
 		rw.Header().Set("Content-Type", "application/json")
@@ -288,6 +291,7 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 	rw.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(rw).Encode(map[string]interface{}{
 		"status":  "started",
+		"task_id": taskID,
 		"message": fmt.Sprintf("Claude is now running on agent '%s'.", req.Agent),
 	})
 }
