@@ -382,23 +382,29 @@ func (a *Agent) readPump() {
 		a.conn.Close()
 	}()
 
-	a.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	a.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 	a.conn.SetPongHandler(func(string) error {
-		a.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		a.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		return nil
+	})
+	a.conn.SetPingHandler(func(string) error {
+		a.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		// Send pong back (default behavior we need to preserve)
+		a.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return a.conn.WriteMessage(websocket.PongMessage, nil)
 	})
 
 	for {
 		var msg AgentMessage
 		if err := a.conn.ReadJSON(&msg); err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Agent read error: %v", err)
+			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				log.Printf("Agent '%s' read error: %v", a.Name, err)
 			}
 			return
 		}
 
 		// Reset read deadline on any message
-		a.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		a.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 
 		switch msg.Type {
 		case AgentMsgRegister:

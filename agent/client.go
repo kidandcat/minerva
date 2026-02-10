@@ -166,10 +166,20 @@ func (c *Client) handleMessages() {
 		c.closeConn()
 	}()
 
-	// Set up pong handler to reset read deadline (handles WebSocket protocol pongs)
-	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	// Set up handlers to reset read deadline on any WebSocket activity
+	c.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		c.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		return nil
+	})
+	c.conn.SetPingHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		c.connLock.Lock()
+		defer c.connLock.Unlock()
+		if c.conn != nil {
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			return c.conn.WriteMessage(websocket.PongMessage, nil)
+		}
 		return nil
 	})
 
@@ -190,7 +200,7 @@ func (c *Client) handleMessages() {
 		}
 
 		// Reset read deadline on any application message
-		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		c.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 
 		switch msg.Type {
 		case MsgTypeTask:
