@@ -23,7 +23,6 @@ type ServerState struct {
 	webhook        *WebhookServer
 	relayClient    *RelayClient
 	scheduler      *Scheduler
-	stopReminders  chan struct{}
 	mu             sync.Mutex
 	running        bool
 }
@@ -105,30 +104,11 @@ func StartServer(config *Config) error {
 
 	// Create server state
 	state := &ServerState{
-		bot:           bot,
-		db:            db,
-		taskRunner:    bot.taskRunner,
-		stopReminders: make(chan struct{}),
-		running:       true,
+		bot:        bot,
+		db:         db,
+		taskRunner: bot.taskRunner,
+		running:    true,
 	}
-
-	// Start reminder checker
-	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		log.Println("Reminder checker started")
-
-		for {
-			select {
-			case <-ticker.C:
-				if err := bot.CheckReminders(); err != nil {
-					log.Printf("Reminder check error: %v", err)
-				}
-			case <-state.stopReminders:
-				return
-			}
-		}
-	}()
 
 	// Start scheduler for scheduled tasks
 	state.scheduler = NewScheduler(db, bot, bot.agentHub)
@@ -217,7 +197,6 @@ func StopServer() {
 	log.Println("Stopping Minerva...")
 
 	// Stop components
-	close(serverState.stopReminders)
 	if serverState.scheduler != nil {
 		serverState.scheduler.Stop()
 	}

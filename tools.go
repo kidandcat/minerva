@@ -28,14 +28,6 @@ func (t *ToolExecutor) Execute(name string, arguments string, bot *Bot) (string,
 	log.Printf("[TOOL] Executing tool: %s with args: %s", name, arguments)
 	defer log.Printf("[TOOL] Finished tool: %s", name)
 	switch name {
-	case "create_reminder":
-		return tools.CreateReminder(t.db, t.userID, arguments)
-	case "list_reminders":
-		return tools.ListReminders(t.db, t.userID)
-	case "delete_reminder":
-		return tools.DeleteReminder(t.db, t.userID, arguments)
-	case "reschedule_reminder":
-		return tools.RescheduleReminder(t.db, t.userID, arguments)
 	case "update_memory":
 		return tools.UpdateMemory(t.db, t.userID, arguments)
 	case "run_code":
@@ -161,81 +153,6 @@ func executeGetTaskProgress(bot *Bot, arguments string) (string, error) {
 // GetToolDefinitions returns all available tool definitions for the AI
 func GetToolDefinitions() []Tool {
 	return []Tool{
-		{
-			Type: "function",
-			Function: ToolFunction{
-				Name:        "create_reminder",
-				Description: "Create a reminder for the user at a specific time. Use target='user' to send directly to the user, or target='ai' to send to you (AI) for processing (useful for tasks that need AI action).",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"message": map[string]any{
-							"type":        "string",
-							"description": "The reminder message",
-						},
-						"remind_at": map[string]any{
-							"type":        "string",
-							"description": "When to send the reminder in ISO8601 format (e.g., 2024-01-15T14:30:00Z)",
-						},
-						"target": map[string]any{
-							"type":        "string",
-							"enum":        []string{"user", "ai"},
-							"description": "Who receives the reminder: 'user' (direct message) or 'ai' (AI processes and responds). Default: 'user'",
-						},
-					},
-					"required": []string{"message", "remind_at"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: ToolFunction{
-				Name:        "list_reminders",
-				Description: "List all pending reminders for the user",
-				Parameters: map[string]any{
-					"type":       "object",
-					"properties": map[string]any{},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: ToolFunction{
-				Name:        "delete_reminder",
-				Description: "Dismiss a reminder permanently. ONLY use this when the user explicitly asks to remove/delete/dismiss a reminder. Never dismiss reminders on your own.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"id": map[string]any{
-							"type":        "integer",
-							"description": "The ID of the reminder to dismiss",
-						},
-					},
-					"required": []string{"id"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: ToolFunction{
-				Name:        "reschedule_reminder",
-				Description: "Reschedule a fired reminder for a new future time. Use this when a reminder fires and is still relevant (recurring tasks, habits, follow-ups). The reminder keeps its original message and ID.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"id": map[string]any{
-							"type":        "integer",
-							"description": "The ID of the reminder to reschedule",
-						},
-						"remind_at": map[string]any{
-							"type":        "string",
-							"description": "New time in ISO8601 format (e.g., 2024-01-15T14:30:00Z)",
-						},
-					},
-					"required": []string{"id", "remind_at"},
-				},
-			},
-		},
 		{
 			Type: "function",
 			Function: ToolFunction{

@@ -46,7 +46,6 @@ func (b *Bot) Start() {
 		tgbotapi.BotCommand{Command: "start", Description: "Show help"},
 		tgbotapi.BotCommand{Command: "new", Description: "New conversation"},
 		tgbotapi.BotCommand{Command: "history", Description: "View conversations"},
-		tgbotapi.BotCommand{Command: "reminders", Description: "View reminders"},
 		tgbotapi.BotCommand{Command: "tasks", Description: "View background tasks"},
 		tgbotapi.BotCommand{Command: "memory", Description: "View what I remember"},
 		tgbotapi.BotCommand{Command: "system", Description: "Set system prompt"},
@@ -97,46 +96,6 @@ func (b *Bot) Start() {
 func (b *Bot) Stop() {
 	b.running = false
 	b.api.StopReceivingUpdates()
-}
-
-// CheckReminders checks and processes pending reminders
-func (b *Bot) CheckReminders() error {
-	reminders, err := b.db.GetPendingReminders()
-	if err != nil {
-		return err
-	}
-	for _, r := range reminders {
-		if err := b.db.MarkReminderFired(r.ID); err != nil {
-			log.Printf("Failed to mark reminder %d as fired: %v", r.ID, err)
-			continue
-		}
-		if err := b.processReminder(r); err != nil {
-			log.Printf("Failed to process reminder %d: %v", r.ID, err)
-			b.db.RescheduleReminder(r.ID, r.RemindAt)
-		}
-	}
-	return nil
-}
-
-func (b *Bot) processReminder(r Reminder) error {
-	log.Printf("Processing reminder %d for user %d: %s", r.ID, r.UserID, r.Message)
-
-	// Build prompt with reminder context
-	prompt := fmt.Sprintf(`[REMINDER FIRED - ID: %d]
-Message: %s
-Scheduled: %s
-
-Notify the user about this reminder. Then decide:
-- If the reminder is still relevant (recurring tasks, follow-ups, habits), use reschedule_reminder to set a new future time.
-- If it seems like a one-time reminder, leave it as fired.
-- NEVER delete/dismiss reminders yourself. Only the user can dismiss them explicitly.`, r.ID, r.Message, r.RemindAt.Format("Jan 2, 2006 at 15:04"))
-
-	response, err := b.ai.Chat(prompt)
-	if err != nil {
-		return fmt.Errorf("AI error: %w", err)
-	}
-
-	return b.sendMessage(r.UserID, response)
 }
 
 func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) error {
@@ -246,8 +205,6 @@ func (b *Bot) handleCommand(update tgbotapi.Update) error {
 		return b.handleSystem(msg, args, user)
 	case "memory":
 		return b.handleMemory(msg, user)
-	case "reminders":
-		return b.handleReminders(msg, user)
 	case "tasks":
 		return b.handleTasks(msg, user)
 	case "token":
@@ -271,7 +228,6 @@ Commands:
 /history - View past conversations
 /system <prompt> - Set custom AI behavior
 /memory - View what I remember
-/reminders - View pending reminders
 /tasks - View running tasks
 /token <token> - Update Claude Code OAuth token
 /status - Phone/server status
@@ -333,22 +289,6 @@ func (b *Bot) handleMemory(msg *tgbotapi.Message, user *User) error {
 		return b.sendMessage(msg.Chat.ID, "No memory stored yet.")
 	}
 	return b.sendMessage(msg.Chat.ID, fmt.Sprintf("*Memory:*\n\n%s\n\n(%d/2000 chars)", memory, len(memory)))
-}
-
-func (b *Bot) handleReminders(msg *tgbotapi.Message, user *User) error {
-	reminders, err := b.db.GetUserReminders(user.ID)
-	if err != nil {
-		return err
-	}
-	if len(reminders) == 0 {
-		return b.sendMessage(msg.Chat.ID, "No pending reminders.")
-	}
-	var sb strings.Builder
-	sb.WriteString("*Pending reminders:*\n\n")
-	for i, r := range reminders {
-		sb.WriteString(fmt.Sprintf("%d. %s\n   %s (%s)\n\n", i+1, r.Message, r.RemindAt.Format("Jan 2, 15:04"), formatDuration(time.Until(r.RemindAt))))
-	}
-	return b.sendMessage(msg.Chat.ID, sb.String())
 }
 
 func (b *Bot) handleTasks(msg *tgbotapi.Message, user *User) error {
@@ -621,15 +561,3 @@ func (b *Bot) sendDocument(chatID int64, filename string, data []byte) error {
 	return err
 }
 
-func formatDuration(d time.Duration) string {
-	if d < 0 {
-		return "overdue"
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("in %d min", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("in %d hours", int(d.Hours()))
-	}
-	return fmt.Sprintf("in %d days", int(d.Hours()/24))
-}

@@ -153,46 +153,6 @@ func errorResponse(id any, code int, message string) Response {
 func getTools() []Tool {
 	return []Tool{
 		{
-			Name:        "create_reminder",
-			Description: "Create a reminder for the user at a specific time",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"message": map[string]any{
-						"type":        "string",
-						"description": "The reminder message",
-					},
-					"remind_at": map[string]any{
-						"type":        "string",
-						"description": "When to send the reminder in ISO8601 format (e.g., 2024-01-15T14:30:00Z)",
-					},
-				},
-				"required": []string{"message", "remind_at"},
-			},
-		},
-		{
-			Name:        "list_reminders",
-			Description: "List all pending reminders for the user",
-			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
-			},
-		},
-		{
-			Name:        "delete_reminder",
-			Description: "Delete a reminder by ID",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"id": map[string]any{
-						"type":        "integer",
-						"description": "The ID of the reminder to delete",
-					},
-				},
-				"required": []string{"id"},
-			},
-		},
-		{
 			Name:        "update_memory",
 			Description: "Update the user's persistent memory. Use this to store important information about the user that should be remembered across conversations.",
 			InputSchema: map[string]any{
@@ -219,58 +179,6 @@ func getTools() []Tool {
 
 func callTool(name string, args map[string]any) (string, error) {
 	switch name {
-	case "create_reminder":
-		message, _ := args["message"].(string)
-		remindAt, _ := args["remind_at"].(string)
-		if message == "" || remindAt == "" {
-			return "", fmt.Errorf("message and remind_at are required")
-		}
-		_, err := db.Exec(
-			"INSERT INTO reminders (user_id, message, remind_at) VALUES (?, ?, ?)",
-			userID, message, remindAt,
-		)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("Reminder created: %s at %s", message, remindAt), nil
-
-	case "list_reminders":
-		rows, err := db.Query(
-			"SELECT id, message, remind_at FROM reminders WHERE user_id = ? AND sent = 0 ORDER BY remind_at",
-			userID,
-		)
-		if err != nil {
-			return "", err
-		}
-		defer rows.Close()
-
-		var reminders []string
-		for rows.Next() {
-			var id int
-			var message, remindAt string
-			rows.Scan(&id, &message, &remindAt)
-			reminders = append(reminders, fmt.Sprintf("- [%d] %s (at %s)", id, message, remindAt))
-		}
-		if len(reminders) == 0 {
-			return "No pending reminders", nil
-		}
-		return fmt.Sprintf("Pending reminders:\n%s", join(reminders, "\n")), nil
-
-	case "delete_reminder":
-		id, _ := args["id"].(float64)
-		result, err := db.Exec(
-			"DELETE FROM reminders WHERE id = ? AND user_id = ?",
-			int(id), userID,
-		)
-		if err != nil {
-			return "", err
-		}
-		affected, _ := result.RowsAffected()
-		if affected == 0 {
-			return "Reminder not found", nil
-		}
-		return "Reminder deleted", nil
-
 	case "update_memory":
 		content, _ := args["content"].(string)
 		if content == "" {
@@ -301,13 +209,3 @@ func callTool(name string, args map[string]any) (string, error) {
 	}
 }
 
-func join(strs []string, sep string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	result := strs[0]
-	for _, s := range strs[1:] {
-		result += sep + s
-	}
-	return result
-}

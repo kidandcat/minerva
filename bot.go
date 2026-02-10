@@ -49,7 +49,6 @@ func (b *Bot) Start() {
 	// Register bot commands menu
 	commands := tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "start", Description: "Mostrar bienvenida y ayuda"},
-		tgbotapi.BotCommand{Command: "reminders", Description: "Ver recordatorios pendientes"},
 		tgbotapi.BotCommand{Command: "clear", Description: "Limpiar contexto de conversación"},
 		tgbotapi.BotCommand{Command: "token", Description: "Actualizar OAuth token de Claude"},
 	)
@@ -105,93 +104,6 @@ func (b *Bot) Start() {
 func (b *Bot) Stop() {
 	b.running = false
 	b.api.StopReceivingUpdates()
-}
-
-// CheckReminders checks pending reminders and routes them through the AI brain
-func (b *Bot) CheckReminders() error {
-	reminders, err := b.db.GetPendingReminders()
-	if err != nil {
-		return err
-	}
-
-	for _, r := range reminders {
-		// Mark as fired FIRST to prevent double-processing on next tick
-		if err := b.db.MarkReminderFired(r.ID); err != nil {
-			log.Printf("Failed to mark reminder %d as fired: %v", r.ID, err)
-			continue
-		}
-
-		// ALL reminders go through the AI brain
-		if err := b.processAIReminder(r); err != nil {
-			log.Printf("Failed to process reminder %d: %v", r.ID, err)
-			// Revert to pending so it retries next cycle
-			b.db.RescheduleReminder(r.ID, r.RemindAt)
-		}
-	}
-
-	return nil
-}
-
-// processAIReminder sends a reminder to the AI brain for processing
-func (b *Bot) processAIReminder(r Reminder) error {
-	log.Printf("Processing reminder %d for user %d: %s", r.ID, r.UserID, r.Message)
-
-	// Get user
-	user, _, err := b.db.GetOrCreateUser(r.UserID, "", "")
-	if err != nil {
-		return err
-	}
-
-	// Get active conversation
-	conv, err := b.db.GetActiveConversation(user.ID)
-	if err != nil {
-		return err
-	}
-
-	// Load context
-	dbMessages, err := b.db.GetConversationMessages(conv.ID, b.config.MaxContextMessages)
-	if err != nil {
-		return err
-	}
-
-	var messages []ChatMessage
-	for _, m := range dbMessages {
-		cm := ChatMessage{
-			Role:    m.Role,
-			Content: m.Content,
-		}
-		messages = append(messages, cm)
-	}
-
-	// Add reminder as a system-triggered message with persistent reminder instructions
-	reminderPrompt := fmt.Sprintf(`[REMINDER FIRED - ID: %d]
-Message: %s
-Scheduled: %s
-
-Notify the user about this reminder. Then decide:
-- If the reminder is still relevant (recurring tasks, follow-ups, habits), use reschedule_reminder to set a new future time.
-- If it seems like a one-time reminder, leave it as fired.
-- NEVER delete/dismiss reminders yourself. Only the user can dismiss them explicitly.`, r.ID, r.Message, r.RemindAt.Format("Jan 2, 2006 at 15:04"))
-
-	messages = append(messages, ChatMessage{
-		Role:    "user",
-		Content: reminderPrompt,
-	})
-
-	// Save the reminder trigger message
-	b.db.SaveMessage(conv.ID, "user", reminderPrompt, nil)
-
-	// Chat with AI
-	response, err := b.chatWithAI(messages, user.SystemPrompt, user.ID, conv.ID)
-	if err != nil {
-		return fmt.Errorf("AI error: %w", err)
-	}
-
-	// Save assistant response
-	b.db.SaveMessage(conv.ID, "assistant", response.Content, nil)
-
-	// Send AI response to user
-	return b.sendMessage(r.UserID, response.Content)
 }
 
 // ProcessSystemEvent processes a system event (like call summaries) through the AI brain
@@ -411,8 +323,6 @@ func (b *Bot) handleCommand(update tgbotapi.Update) error {
 	}
 
 	switch command {
-	case "reminders":
-		return b.handleReminders(msg, user)
 	case "clear":
 		return b.handleClear(msg, user)
 	case "token":
@@ -428,7 +338,6 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) error {
 Envíame un mensaje para chatear.
 
 *Comandos:*
-/reminders - Ver recordatorios pendientes
 /clear - Limpiar contexto de conversación
 /token <token> - Actualizar OAuth token de Claude`
 
@@ -466,31 +375,6 @@ func (b *Bot) handleToken(msg *tgbotapi.Message, args string) error {
 	}
 
 	return b.sendMessage(msg.Chat.ID, "OAuth token updated.")
-}
-
-func (b *Bot) handleReminders(msg *tgbotapi.Message, user *User) error {
-	reminders, err := b.db.GetUserReminders(user.ID)
-	if err != nil {
-		return err
-	}
-
-	if len(reminders) == 0 {
-		return b.sendMessage(msg.Chat.ID, "No pending reminders. Ask me to set one!")
-	}
-
-	var sb strings.Builder
-	sb.WriteString("*Pending reminders:*\n\n")
-
-	for i, r := range reminders {
-		timeStr := r.RemindAt.Format("Jan 2, 15:04")
-		until := time.Until(r.RemindAt)
-		untilStr := formatDuration(until)
-
-		sb.WriteString(fmt.Sprintf("%d. %s\n   🕐 %s (%s)\n\n",
-			i+1, r.Message, timeStr, untilStr))
-	}
-
-	return b.sendMessage(msg.Chat.ID, sb.String())
 }
 
 func (b *Bot) handleMessage(update tgbotapi.Update) error {
@@ -723,19 +607,6 @@ func (b *Bot) sendDocument(chatID int64, filename string, data []byte) error {
 func (b *Bot) sendTypingAction(chatID int64) {
 	action := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
 	b.api.Send(action)
-}
-
-func formatDuration(d time.Duration) string {
-	if d < 0 {
-		return "overdue"
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("in %d min", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("in %d hours", int(d.Hours()))
-	}
-	return fmt.Sprintf("in %d days", int(d.Hours()/24))
 }
 
 func truncate(s string, n int) string {

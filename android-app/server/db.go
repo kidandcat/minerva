@@ -41,17 +41,6 @@ type Message struct {
 	CreatedAt      time.Time
 }
 
-// Reminder represents a scheduled reminder
-type Reminder struct {
-	ID        int64
-	UserID    int64
-	Message   string
-	RemindAt  time.Time
-	Target    string
-	Status    string
-	CreatedAt time.Time
-}
-
 // Task represents a long-running background task
 type Task struct {
 	ID          string
@@ -121,17 +110,6 @@ func (db *DB) runMigrations() error {
 		FOREIGN KEY (user_id) REFERENCES users(id)
 	);
 
-	CREATE TABLE IF NOT EXISTS reminders (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		user_id INTEGER NOT NULL,
-		message TEXT NOT NULL,
-		remind_at DATETIME NOT NULL,
-		target TEXT DEFAULT 'user',
-		status TEXT DEFAULT 'pending',
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY (user_id) REFERENCES users(id)
-	);
-
 	CREATE TABLE IF NOT EXISTS memory (
 		user_id INTEGER PRIMARY KEY,
 		content TEXT NOT NULL,
@@ -150,7 +128,6 @@ func (db *DB) runMigrations() error {
 
 	CREATE INDEX IF NOT EXISTS idx_conversations_user_active ON conversations(user_id, active);
 	CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
-	CREATE INDEX IF NOT EXISTS idx_reminders_status ON reminders(status, remind_at);
 	CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id);
 	`
 	_, err := db.Exec(schema)
@@ -304,78 +281,6 @@ func (db *DB) GetUserConversations(userID int64, limit int) ([]Conversation, err
 		conversations = append(conversations, conv)
 	}
 	return conversations, rows.Err()
-}
-
-func (db *DB) GetPendingReminders() ([]Reminder, error) {
-	rows, err := db.Query(`
-		SELECT id, user_id, message, remind_at, target, status, created_at
-		FROM reminders WHERE status = 'pending' AND remind_at <= ?
-	`, time.Now().Format(time.RFC3339))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var reminders []Reminder
-	for rows.Next() {
-		var r Reminder
-		var target sql.NullString
-		var remindAtStr, createdAtStr string
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &remindAtStr, &target, &r.Status, &createdAtStr); err != nil {
-			return nil, err
-		}
-		r.RemindAt, _ = time.Parse(time.RFC3339, remindAtStr)
-		r.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-		r.Target = "user"
-		if target.Valid {
-			r.Target = target.String
-		}
-		reminders = append(reminders, r)
-	}
-	return reminders, rows.Err()
-}
-
-func (db *DB) MarkReminderFired(reminderID int64) error {
-	_, err := db.Exec(`UPDATE reminders SET status = 'fired' WHERE id = ?`, reminderID)
-	return err
-}
-
-func (db *DB) RescheduleReminder(reminderID int64, newTime time.Time) error {
-	_, err := db.Exec(`UPDATE reminders SET remind_at = ?, status = 'pending' WHERE id = ?`, newTime, reminderID)
-	return err
-}
-
-func (db *DB) DismissReminder(reminderID int64) error {
-	_, err := db.Exec(`UPDATE reminders SET status = 'done' WHERE id = ?`, reminderID)
-	return err
-}
-
-func (db *DB) GetUserReminders(userID int64) ([]Reminder, error) {
-	rows, err := db.Query(`
-		SELECT id, user_id, message, remind_at, target, status, created_at
-		FROM reminders WHERE user_id = ? AND status IN ('pending', 'fired')
-		ORDER BY remind_at ASC
-	`, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var reminders []Reminder
-	for rows.Next() {
-		var r Reminder
-		var target sql.NullString
-		var remindAtStr, createdAtStr string
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &remindAtStr, &target, &r.Status, &createdAtStr); err != nil {
-			return nil, err
-		}
-		r.RemindAt, _ = time.Parse(time.RFC3339, remindAtStr)
-		r.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-		r.Target = "user"
-		if target.Valid {
-			r.Target = target.String
-		}
-		reminders = append(reminders, r)
-	}
-	return reminders, rows.Err()
 }
 
 func (db *DB) GetUserMemory(userID int64) (string, error) {

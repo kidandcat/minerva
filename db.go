@@ -42,17 +42,6 @@ type Message struct {
 	CreatedAt      time.Time
 }
 
-// Reminder represents a scheduled reminder
-type Reminder struct {
-	ID        int64
-	UserID    int64
-	Message   string
-	RemindAt  time.Time
-	Target    string // "user" or "ai"
-	Status    string // "pending", "fired", "done"
-	CreatedAt time.Time
-}
-
 // Memory represents user's persistent memory (max 2000 chars)
 type Memory struct {
 	UserID    int64
@@ -134,29 +123,6 @@ func (db *DB) runMigrations() error {
 		FOREIGN KEY (user_id) REFERENCES users(id)
 	);
 
-	CREATE TABLE IF NOT EXISTS reminders (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		user_id INTEGER NOT NULL,
-		message TEXT NOT NULL,
-		remind_at DATETIME NOT NULL,
-		target TEXT DEFAULT 'user',
-		sent BOOLEAN DEFAULT FALSE,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY (user_id) REFERENCES users(id)
-	);
-
-	CREATE TABLE IF NOT EXISTS tasks (
-		id TEXT PRIMARY KEY,
-		user_id INTEGER NOT NULL,
-		description TEXT NOT NULL,
-		status TEXT DEFAULT 'running',
-		pid INTEGER,
-		output TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		completed_at DATETIME,
-		FOREIGN KEY (user_id) REFERENCES users(id)
-	);
-
 	CREATE TABLE IF NOT EXISTS memory (
 		user_id INTEGER PRIMARY KEY,
 		content TEXT NOT NULL,
@@ -166,33 +132,11 @@ func (db *DB) runMigrations() error {
 
 	CREATE INDEX IF NOT EXISTS idx_conversations_user_active ON conversations(user_id, active);
 	CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
-	CREATE INDEX IF NOT EXISTS idx_reminders_pending ON reminders(sent, remind_at);
 	`
 
 	_, err := db.Exec(schema)
 	if err != nil {
 		return err
-	}
-
-	// Migration: add status column to reminders (replaces sent boolean)
-	var colCount int
-	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('reminders') WHERE name='status'`).Scan(&colCount)
-	if err != nil {
-		return err
-	}
-	if colCount == 0 {
-		_, err = db.Exec(`ALTER TABLE reminders ADD COLUMN status TEXT DEFAULT 'pending'`)
-		if err != nil {
-			return err
-		}
-		_, err = db.Exec(`UPDATE reminders SET status = CASE WHEN sent = TRUE THEN 'done' ELSE 'pending' END`)
-		if err != nil {
-			return err
-		}
-		_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_reminders_status ON reminders(status, remind_at)`)
-		if err != nil {
-			return err
-		}
 	}
 
 	return nil
@@ -391,89 +335,6 @@ func (db *DB) GetUserConversations(userID int64, limit int) ([]Conversation, err
 	}
 
 	return conversations, rows.Err()
-}
-
-// GetPendingReminders retrieves pending reminders that are due
-func (db *DB) GetPendingReminders() ([]Reminder, error) {
-	rows, err := db.Query(`
-		SELECT id, user_id, message, remind_at, target, COALESCE(status, 'pending'), created_at
-		FROM reminders
-		WHERE (status = 'pending' OR (status IS NULL AND sent = FALSE)) AND remind_at <= ?
-	`, time.Now().Format(time.RFC3339))
-	if err != nil {
-		return nil, fmt.Errorf("failed to query pending reminders: %w", err)
-	}
-	defer rows.Close()
-
-	var reminders []Reminder
-	for rows.Next() {
-		var r Reminder
-		var target sql.NullString
-		var remindAtStr, createdAtStr string
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &remindAtStr, &target, &r.Status, &createdAtStr); err != nil {
-			return nil, fmt.Errorf("failed to scan reminder: %w", err)
-		}
-		r.RemindAt, _ = time.Parse(time.RFC3339, remindAtStr)
-		r.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-		r.Target = "user"
-		if target.Valid {
-			r.Target = target.String
-		}
-		reminders = append(reminders, r)
-	}
-
-	return reminders, rows.Err()
-}
-
-// MarkReminderFired marks a reminder as fired (being processed by brain)
-func (db *DB) MarkReminderFired(reminderID int64) error {
-	_, err := db.Exec(`UPDATE reminders SET status = 'fired', sent = TRUE WHERE id = ?`, reminderID)
-	return err
-}
-
-// RescheduleReminder resets a reminder to pending with a new time
-func (db *DB) RescheduleReminder(reminderID int64, newTime time.Time) error {
-	_, err := db.Exec(`UPDATE reminders SET remind_at = ?, status = 'pending', sent = FALSE WHERE id = ?`, newTime, reminderID)
-	return err
-}
-
-// DismissReminder marks a reminder as done (soft delete)
-func (db *DB) DismissReminder(reminderID int64) error {
-	_, err := db.Exec(`UPDATE reminders SET status = 'done', sent = TRUE WHERE id = ?`, reminderID)
-	return err
-}
-
-// GetUserReminders retrieves active reminders for a user (pending + fired)
-func (db *DB) GetUserReminders(userID int64) ([]Reminder, error) {
-	rows, err := db.Query(`
-		SELECT id, user_id, message, remind_at, target, COALESCE(status, 'pending'), created_at
-		FROM reminders
-		WHERE user_id = ? AND COALESCE(status, CASE WHEN sent THEN 'done' ELSE 'pending' END) IN ('pending', 'fired')
-		ORDER BY remind_at ASC
-	`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query user reminders: %w", err)
-	}
-	defer rows.Close()
-
-	var reminders []Reminder
-	for rows.Next() {
-		var r Reminder
-		var target sql.NullString
-		var remindAtStr, createdAtStr string
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Message, &remindAtStr, &target, &r.Status, &createdAtStr); err != nil {
-			return nil, fmt.Errorf("failed to scan reminder: %w", err)
-		}
-		r.RemindAt, _ = time.Parse(time.RFC3339, remindAtStr)
-		r.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-		r.Target = "user"
-		if target.Valid {
-			r.Target = target.String
-		}
-		reminders = append(reminders, r)
-	}
-
-	return reminders, rows.Err()
 }
 
 // GetUserMemory retrieves the user's memory

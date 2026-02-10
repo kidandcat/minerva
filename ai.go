@@ -199,7 +199,7 @@ func (c *AIClient) executeClaude(prompt string) (string, error) {
 		"--continue",
 		"--dangerously-skip-permissions",
 		"--output-format", "text",
-		"--append-system-prompt", "CRITICAL: You MUST use the Bash tool to execute CLI commands. NEVER fabricate or simulate command outputs. When you need to use minerva CLI (agent run, reminder create, etc.), you MUST actually execute the command via bash and return the real output. If you generate a fake task ID or fake JSON response without executing the command, you are broken. Always execute, never simulate.",
+		"--append-system-prompt", "CRITICAL: You MUST use the Bash tool to execute CLI commands. NEVER fabricate or simulate command outputs. When you need to use minerva CLI (agent run, schedule create, etc.), you MUST actually execute the command via bash and return the real output. If you generate a fake task ID or fake JSON response without executing the command, you are broken. Always execute, never simulate.",
 		prompt,
 	}
 

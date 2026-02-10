@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -122,23 +121,6 @@ func main() {
 		log.Println("GOOGLE_API_KEY not set, phone bridge disabled")
 	}
 
-	// Start reminder checker
-	stopReminders := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := bot.CheckReminders(); err != nil {
-					log.Printf("Reminder check error: %v", err)
-				}
-			case <-stopReminders:
-				return
-			}
-		}
-	}()
-
 	// Start webhook server
 	if config.WebhookPort > 0 {
 		webhook := NewWebhookServer(bot, config.WebhookPort, bot.agentHub, phoneBridge)
@@ -171,7 +153,6 @@ func main() {
 	sig := <-sigChan
 	log.Printf("Received %v, shutting down...", sig)
 
-	close(stopReminders)
 	bot.Stop()
 	log.Println("Minerva Android shutdown complete")
 }
@@ -208,8 +189,6 @@ func runCLI() {
 	}
 
 	switch cmd {
-	case "reminder":
-		handleReminderCLI(db, userID, args)
 	case "memory":
 		handleMemoryCLI(db, userID, args)
 	case "send":
@@ -235,10 +214,6 @@ func printUsage() {
 Usage:
   minerva-android                              Run the Telegram bot
   minerva-android check                        Check Claude Code authentication
-  minerva-android reminder create "text" --at "2024-02-06T10:00:00Z"  Create a reminder
-  minerva-android reminder list                List pending reminders
-  minerva-android reminder delete <id>         Dismiss a reminder
-  minerva-android reminder reschedule <id> --at "time"  Reschedule a reminder
   minerva-android memory get [key]             Get user memory (all or grep for key)
   minerva-android memory set "content"         Set/update user memory
   minerva-android send "message"               Send a message to admin via Telegram
@@ -248,107 +223,6 @@ Usage:
   minerva-android email send <to> --subject "subject" --body "body"  Send email via Resend
   minerva-android call <number> "purpose"      Make a phone call (via Android + Gemini Live)
   minerva-android help                         Show this help message`)
-}
-
-func handleReminderCLI(db *DB, userID int64, args []string) {
-	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "error: reminder subcommand required (create, list, delete, reschedule)\n")
-		os.Exit(1)
-	}
-
-	subcmd := args[0]
-	subargs := args[1:]
-
-	switch subcmd {
-	case "create":
-		if len(subargs) < 3 {
-			fmt.Fprintf(os.Stderr, "error: usage: minerva-android reminder create \"message\" --at \"2024-02-06T10:00:00Z\"\n")
-			os.Exit(1)
-		}
-		message := subargs[0]
-		var remindAt string
-		for i, arg := range subargs {
-			if arg == "--at" && i+1 < len(subargs) {
-				remindAt = subargs[i+1]
-				break
-			}
-		}
-		if remindAt == "" {
-			fmt.Fprintf(os.Stderr, "error: --at flag is required\n")
-			os.Exit(1)
-		}
-
-		argsJSON, _ := json.Marshal(map[string]string{
-			"message":   message,
-			"remind_at": remindAt,
-			"target":    "user",
-		})
-		result, err := tools.CreateReminder(db.DB, userID, string(argsJSON))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println(result)
-
-	case "list":
-		result, err := tools.ListReminders(db.DB, userID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println(result)
-
-	case "delete":
-		if len(subargs) < 1 {
-			fmt.Fprintf(os.Stderr, "error: usage: minerva-android reminder delete <id>\n")
-			os.Exit(1)
-		}
-		id, err := strconv.ParseInt(subargs[0], 10, 64)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: invalid reminder ID: %v\n", err)
-			os.Exit(1)
-		}
-		argsJSON, _ := json.Marshal(map[string]int64{"id": id})
-		result, err := tools.DeleteReminder(db.DB, userID, string(argsJSON))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println(result)
-
-	case "reschedule":
-		if len(subargs) < 3 {
-			fmt.Fprintf(os.Stderr, "error: usage: minerva-android reminder reschedule <id> --at \"2024-02-06T10:00:00Z\"\n")
-			os.Exit(1)
-		}
-		id, err := strconv.ParseInt(subargs[0], 10, 64)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: invalid reminder ID: %v\n", err)
-			os.Exit(1)
-		}
-		var remindAt string
-		for i, arg := range subargs {
-			if arg == "--at" && i+1 < len(subargs) {
-				remindAt = subargs[i+1]
-				break
-			}
-		}
-		if remindAt == "" {
-			fmt.Fprintf(os.Stderr, "error: --at flag is required\n")
-			os.Exit(1)
-		}
-		argsJSON, _ := json.Marshal(map[string]any{"id": id, "remind_at": remindAt})
-		result, err := tools.RescheduleReminder(db.DB, userID, string(argsJSON))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println(result)
-
-	default:
-		fmt.Fprintf(os.Stderr, "error: unknown reminder subcommand: %s\n", subcmd)
-		os.Exit(1)
-	}
 }
 
 func handleMemoryCLI(db *DB, userID int64, args []string) {
