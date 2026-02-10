@@ -62,6 +62,7 @@ minerva phone list                                         # List connected Andr
 minerva phone call <number> "purpose"                      # Call via Android phone bridge
 minerva agent list                                         # List connected agents
 minerva agent run <name> "prompt" [--dir /path]            # Run task on agent
+minerva file send <path> ["caption"]                       # Send file to admin via Telegram
 minerva schedule create "task" --at "time" --agent name [--dir /path] [--recurring daily|weekly|monthly]
 minerva schedule list                                      # List scheduled tasks
 minerva schedule delete <id>                               # Delete scheduled task
