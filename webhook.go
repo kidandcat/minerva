@@ -28,6 +28,7 @@ type ResendAttachment struct {
 }
 
 // ResendWebhookPayload represents an incoming email webhook from Resend
+// Note: Resend webhooks do NOT include email body (text/html). Must fetch via API.
 type ResendWebhookPayload struct {
 	Type      string `json:"type"`
 	CreatedAt string `json:"created_at"`
@@ -36,11 +37,18 @@ type ResendWebhookPayload struct {
 		From        string             `json:"from"`
 		To          []string           `json:"to"`
 		Subject     string             `json:"subject"`
-		Text        string             `json:"text"`
-		HTML        string             `json:"html"`
 		CreatedAt   string             `json:"created_at"`
 		Attachments []ResendAttachment `json:"attachments"`
 	} `json:"data"`
+}
+
+// ResendReceivedEmail represents the response from GET /emails/receiving/{id}
+type ResendReceivedEmail struct {
+	ID      string `json:"id"`
+	From    string `json:"from"`
+	Subject string `json:"subject"`
+	Text    string `json:"text"`
+	HTML    string `json:"html"`
 }
 
 // WebhookServer handles incoming webhooks
@@ -433,6 +441,44 @@ func (w *WebhookServer) handleEmailWebhook(rw http.ResponseWriter, r *http.Reque
 	rw.WriteHeader(http.StatusOK)
 }
 
+// fetchReceivedEmail fetches the full email content (body) from Resend API.
+// Resend webhooks don't include the body; it must be fetched separately.
+func (w *WebhookServer) fetchReceivedEmail(emailID string) (*ResendReceivedEmail, error) {
+	apiKey := w.bot.config.ResendAPIKey
+	if apiKey == "" {
+		return nil, fmt.Errorf("RESEND_API_KEY not configured")
+	}
+
+	url := fmt.Sprintf("https://api.resend.com/emails/receiving/%s", emailID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := httpClientWithTimeout.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch email: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("resend API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var email ResendReceivedEmail
+	if err := json.Unmarshal(body, &email); err != nil {
+		return nil, fmt.Errorf("failed to parse email response: %w", err)
+	}
+
+	return &email, nil
+}
+
 // processEmailWithAI passes the email to Minerva for processing
 func (w *WebhookServer) processEmailWithAI(payload ResendWebhookPayload, toAddrs string) {
 	adminID := w.bot.config.AdminID
@@ -466,23 +512,30 @@ func (w *WebhookServer) processEmailWithAI(payload ResendWebhookPayload, toAddrs
 		})
 	}
 
-	// Determine email body content
-	emailBody := payload.Data.Text
+	// Fetch the full email content from Resend API (webhook doesn't include body)
+	var emailBody string
 	var screenshotPath string
 
-	// If text body is empty but HTML exists, render the HTML to an image
-	if strings.TrimSpace(emailBody) == "" && strings.TrimSpace(payload.Data.HTML) != "" {
-		log.Printf("[Email] Text body empty, attempting HTML screenshot render")
+	receivedEmail, err := w.fetchReceivedEmail(payload.Data.EmailID)
+	if err != nil {
+		log.Printf("[Email] Failed to fetch email body from Resend API: %v", err)
+		emailBody = "[Failed to retrieve email body]"
+	} else {
+		emailBody = receivedEmail.Text
 
-		imgPath, err := renderHTMLToImage(payload.Data.HTML)
-		if err != nil {
-			log.Printf("[Email] HTML screenshot failed (Chrome not available?): %v", err)
-			// Fallback: include raw HTML as text
-			emailBody = "[HTML-only email - screenshot render failed]\n\n" + payload.Data.HTML
-		} else {
-			log.Printf("[Email] HTML rendered to screenshot: %s", imgPath)
-			screenshotPath = imgPath
-			emailBody = "[HTML-only email - see attached screenshot for visual content]"
+		// If text body is empty but HTML exists, render the HTML to an image
+		if strings.TrimSpace(emailBody) == "" && strings.TrimSpace(receivedEmail.HTML) != "" {
+			log.Printf("[Email] Text body empty, attempting HTML screenshot render")
+
+			imgPath, err := renderHTMLToImage(receivedEmail.HTML)
+			if err != nil {
+				log.Printf("[Email] HTML screenshot failed (Chrome not available?): %v", err)
+				emailBody = "[HTML-only email - screenshot render failed]\n\n" + receivedEmail.HTML
+			} else {
+				log.Printf("[Email] HTML rendered to screenshot: %s", imgPath)
+				screenshotPath = imgPath
+				emailBody = "[HTML-only email - see attached screenshot for visual content]"
+			}
 		}
 	}
 
