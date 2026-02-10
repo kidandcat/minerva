@@ -575,7 +575,7 @@ Key behaviors:
 	req.SetBasicAuth(v.twilioSID, v.twilioToken)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClientWithTimeout.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to initiate call: %w", err)
 	}

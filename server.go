@@ -54,6 +54,9 @@ func StartServer(config *Config) error {
 		tools.SetResendAPIKey(config.ResendAPIKey)
 		tools.SetFromEmail(config.FromEmail)
 		log.Println("Email (Resend) configured")
+		if config.ResendWebhookSecret == "" {
+			log.Println("WARNING: RESEND_WEBHOOK_SECRET not set - email webhooks will reject all requests")
+		}
 	}
 
 	// Create AI client
@@ -164,7 +167,7 @@ func StartServer(config *Config) error {
 	// Start webhook server
 	if config.WebhookPort > 0 {
 		state.webhook = NewWebhookServer(bot, config.WebhookPort, config.ResendWebhookSecret,
-			state.twilioManager, bot.agentHub, state.voiceManager, state.phoneBridge)
+			state.twilioManager, bot.agentHub, state.voiceManager, state.phoneBridge, config)
 		go func() {
 			if err := state.webhook.Start(); err != nil {
 				log.Printf("Webhook server error: %v", err)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 type SendEmailArgs struct {
@@ -84,7 +85,7 @@ func SendEmail(arguments string) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+resendAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to send request: %w", err)
@@ -96,7 +97,7 @@ func SendEmail(arguments string) (string, error) {
 	if resp.StatusCode != 200 {
 		var resendErr ResendError
 		json.Unmarshal(body, &resendErr)
-		return "", fmt.Errorf("Resend API error: %s", resendErr.Message)
+		return "", fmt.Errorf("failed to send email (status %d)", resp.StatusCode)
 	}
 
 	var resendResp ResendResponse

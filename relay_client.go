@@ -245,7 +245,8 @@ func (rc *RelayClient) handleRequest(req RelayMessage) {
 	// Execute request
 	resp, err := rc.httpClient.Do(httpReq)
 	if err != nil {
-		rc.sendResponse(req.ID, 502, nil, "Backend error: "+err.Error())
+		log.Printf("[Relay] Backend request failed: %v", err)
+		rc.sendResponse(req.ID, 502, nil, "backend unavailable")
 		return
 	}
 	defer resp.Body.Close()

@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+const (
+	maxBodySize      int64 = 10 << 20 // 10MB for most endpoints
+	maxEmailBodySize int64 = 50 << 20 // 50MB for email webhooks (attachments)
+)
+
 // ResendAttachment represents an email attachment
 type ResendAttachment struct {
 	ID                 string `json:"id"`
@@ -40,62 +45,87 @@ type ResendWebhookPayload struct {
 
 // WebhookServer handles incoming webhooks
 type WebhookServer struct {
-	bot           *Bot
-	port          int
-	secret        string
-	twilioManager *TwilioCallManager
-	agentHub      *AgentHub
-	voiceManager  *VoiceManager
-	phoneBridge   *PhoneBridge
+	bot            *Bot
+	port           int
+	secret         string
+	twilioManager  *TwilioCallManager
+	agentHub       *AgentHub
+	voiceManager   *VoiceManager
+	phoneBridge    *PhoneBridge
+	config         *Config
+	rateLimiter    *RateLimiter
+	allowedOrigins []string
 }
 
 // NewWebhookServer creates a new webhook server
-func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCallManager, agentHub *AgentHub, voiceManager *VoiceManager, phoneBridge *PhoneBridge) *WebhookServer {
+func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCallManager, agentHub *AgentHub, voiceManager *VoiceManager, phoneBridge *PhoneBridge, config *Config) *WebhookServer {
 	return &WebhookServer{
-		bot:           bot,
-		port:          port,
-		secret:        secret,
-		twilioManager: twilioManager,
-		agentHub:      agentHub,
-		voiceManager:  voiceManager,
-		phoneBridge:   phoneBridge,
+		bot:            bot,
+		port:           port,
+		secret:         secret,
+		twilioManager:  twilioManager,
+		agentHub:       agentHub,
+		voiceManager:   voiceManager,
+		phoneBridge:    phoneBridge,
+		config:         config,
+		rateLimiter:    NewRateLimiter(2, 10), // 2 req/s sustained, burst of 10
+		allowedOrigins: parseAllowedOrigins(),
 	}
 }
 
 // Start starts the webhook server
 func (w *WebhookServer) Start() error {
-	http.HandleFunc("/webhook/email", w.handleEmailWebhook)
+	rl := w.rateLimiter.Middleware
+	body := func(next http.HandlerFunc) http.HandlerFunc { return maxBodyMiddleware(maxBodySize, next) }
+	bigBody := func(next http.HandlerFunc) http.HandlerFunc { return maxBodyMiddleware(maxEmailBodySize, next) }
+	auth := func(next http.HandlerFunc) http.HandlerFunc { return authMiddleware(w.config.AgentPassword, next) }
+	wsAuth := func(next http.HandlerFunc) http.HandlerFunc {
+		return wsAuthMiddleware(w.config.AgentPassword, w.allowedOrigins, next)
+	}
+
+	// Twilio webhook signature validation middleware
+	twilioAuth := func(next http.HandlerFunc) http.HandlerFunc { return next } // default: no-op
+	if w.config.TwilioAuthToken != "" && w.config.BaseURL != "" {
+		twilioAuth = func(next http.HandlerFunc) http.HandlerFunc {
+			return twilioWebhookAuth(w.config.TwilioAuthToken, w.config.BaseURL, next)
+		}
+	}
+
+	// Public endpoints (no auth needed)
 	http.HandleFunc("/health", w.handleHealth)
 
-	// Twilio ConversationRelay WebSocket and incoming calls
+	// Email webhook (validated via Svix signature, not Bearer token)
+	http.HandleFunc("/webhook/email", chainMiddleware(w.handleEmailWebhook, rl, bigBody))
+
+	// Twilio ConversationRelay WebSocket and incoming calls (validated via Twilio signature)
 	if w.twilioManager != nil {
-		http.HandleFunc("/twilio/ws", w.twilioManager.HandleWebSocket)
-		http.HandleFunc("/twilio/voice", w.twilioManager.HandleIncomingCall)
+		http.HandleFunc("/twilio/ws", chainMiddleware(w.twilioManager.HandleWebSocket, rl))
+		http.HandleFunc("/twilio/voice", chainMiddleware(w.twilioManager.HandleIncomingCall, rl, body, twilioAuth))
 	}
 
 	// Voice AI (Gemini Live) endpoints
 	if w.voiceManager != nil {
-		http.HandleFunc("/voice/incoming", w.voiceManager.HandleIncoming)
-		http.HandleFunc("/voice/ws", w.voiceManager.HandleMediaStream)
-		http.HandleFunc("/voice/call", w.handleVoiceCall)
+		http.HandleFunc("/voice/incoming", chainMiddleware(w.voiceManager.HandleIncoming, rl, body, twilioAuth))
+		http.HandleFunc("/voice/ws", chainMiddleware(w.voiceManager.HandleMediaStream, rl))
+		http.HandleFunc("/voice/call", chainMiddleware(w.handleVoiceCall, rl, body, auth))
 		log.Println("Voice AI endpoints: /voice/incoming, /voice/ws, /voice/call")
 	}
 
-	// Android Phone Bridge endpoint
+	// Android Phone Bridge endpoint (auth required)
 	if w.phoneBridge != nil {
-		http.HandleFunc("/phone/ws", w.phoneBridge.HandleWebSocket)
-		http.HandleFunc("/phone/list", w.handlePhoneList)
-		http.HandleFunc("/phone/call", w.handlePhoneCall)
+		http.HandleFunc("/phone/ws", chainMiddleware(w.phoneBridge.HandleWebSocket, rl, wsAuth))
+		http.HandleFunc("/phone/list", chainMiddleware(w.handlePhoneList, rl, auth))
+		http.HandleFunc("/phone/call", chainMiddleware(w.handlePhoneCall, rl, body, auth))
 		log.Println("Phone Bridge endpoints: /phone/ws, /phone/list, /phone/call")
 	}
 
-	// Agent WebSocket endpoint
+	// Agent WebSocket endpoint (auth required)
 	if w.agentHub != nil {
-		http.HandleFunc("/agent", w.agentHub.HandleWebSocket)
-		http.HandleFunc("/agent/list", w.handleAgentList)
-		http.HandleFunc("/agent/run", w.handleAgentRun)
-		log.Println("Agent WebSocket endpoint: /agent")
-		log.Println("Agent API endpoints: /agent/list, /agent/run")
+		http.HandleFunc("/agent", chainMiddleware(w.agentHub.HandleWebSocket, rl, wsAuth))
+		http.HandleFunc("/agent/list", chainMiddleware(w.handleAgentList, rl, auth))
+		http.HandleFunc("/agent/run", chainMiddleware(w.handleAgentRun, rl, body, auth))
+		log.Println("Agent WebSocket endpoint: /agent (auth required)")
+		log.Println("Agent API endpoints: /agent/list, /agent/run (auth required)")
 	}
 
 	addr := fmt.Sprintf(":%d", w.port)
@@ -135,7 +165,9 @@ func (w *WebhookServer) handleVoiceCall(rw http.ResponseWriter, r *http.Request)
 	callSID, err := w.voiceManager.MakeCall(req.To, req.Purpose)
 	if err != nil {
 		log.Printf("[Voice] Failed to make call: %v", err)
-		json.NewEncoder(rw).Encode(map[string]any{"error": err.Error()})
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(rw).Encode(map[string]any{"error": "failed to initiate call"})
 		return
 	}
 
@@ -185,7 +217,9 @@ func (w *WebhookServer) handlePhoneCall(rw http.ResponseWriter, r *http.Request)
 
 	if err := w.phoneBridge.MakeCall(req.DeviceID, req.To, req.Purpose); err != nil {
 		log.Printf("[Phone] Failed to make call: %v", err)
-		json.NewEncoder(rw).Encode(map[string]any{"error": err.Error()})
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(rw).Encode(map[string]any{"error": "failed to initiate call"})
 		return
 	}
 
@@ -219,11 +253,12 @@ func (w *WebhookServer) handleAgentList(rw http.ResponseWriter, r *http.Request)
 		// Get projects for this agent
 		projects, err := w.agentHub.GetProjects(name, 5*time.Second)
 		if err != nil {
+			log.Printf("[Agent] Failed to get projects for '%s': %v", name, err)
 			result[name] = map[string]interface{}{
 				"workDir":      workDir,
 				"projects":     []string{},
 				"active_tasks": activeTasks,
-				"error":        err.Error(),
+				"error":        "failed to retrieve projects",
 			}
 		} else {
 			result[name] = map[string]interface{}{
@@ -267,13 +302,19 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Validate dir field against path traversal (M2)
+	if err := validateDirField(req.Dir); err != nil {
+		http.Error(rw, `{"error": "invalid directory"}`, http.StatusBadRequest)
+		return
+	}
+
 	taskID, err := w.agentHub.SendTask(req.Agent, req.Prompt, req.Dir)
 	if err != nil {
 		log.Printf("[Agent] Failed to send task to '%s': %v", req.Agent, err)
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(rw).Encode(map[string]interface{}{
-			"error": err.Error(),
+			"error": "failed to start task",
 		})
 		return
 	}
@@ -299,7 +340,7 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 // verifySignature verifies the Svix webhook signature
 func (w *WebhookServer) verifySignature(payload []byte, signature, msgID, timestamp string) bool {
 	if w.secret == "" {
-		return true // No secret configured, skip verification
+		return false // No secret configured, reject all webhooks
 	}
 
 	// Remove "whsec_" prefix if present
@@ -350,13 +391,13 @@ func (w *WebhookServer) handleEmailWebhook(rw http.ResponseWriter, r *http.Reque
 	msgID := r.Header.Get("svix-id")
 	timestamp := r.Header.Get("svix-timestamp")
 
-	if w.secret != "" && !w.verifySignature(body, signature, msgID, timestamp) {
+	if !w.verifySignature(body, signature, msgID, timestamp) {
 		log.Printf("Webhook signature verification failed")
 		http.Error(rw, "Invalid signature", http.StatusUnauthorized)
 		return
 	}
 
-	log.Printf("Received email webhook: %s", string(body))
+	log.Printf("Received email webhook (%d bytes)", len(body))
 
 	var payload ResendWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -535,7 +576,7 @@ func (w *WebhookServer) sendAttachmentsToTelegram(emailID string, attachments []
 		}
 		req.Header.Set("Authorization", "Bearer "+resendKey)
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClientWithTimeout.Do(req)
 		if err != nil {
 			log.Printf("Failed to download attachment %s: %v", att.Filename, err)
 			continue

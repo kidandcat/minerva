@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -261,8 +262,8 @@ func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 }
 
 func (h *AgentHub) registerAgent(agent *Agent, password string) bool {
-	// Verify password
-	if h.password != "" && password != h.password {
+	// Verify password using constant-time comparison to prevent timing attacks
+	if h.password != "" && subtle.ConstantTimeCompare([]byte(password), []byte(h.password)) != 1 {
 		log.Printf("Agent '%s' rejected: invalid password", agent.Name)
 		return false
 	}

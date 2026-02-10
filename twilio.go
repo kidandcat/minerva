@@ -1,13 +1,16 @@
 package main
 
 import (
-	"bytes"
+	"crypto/hmac"
+	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 
@@ -150,7 +153,7 @@ func (t *TwilioCallManager) InitiateCall(to, purpose string, userID, convID int6
 	req.SetBasicAuth(t.accountSID, t.authToken)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClientWithTimeout.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to initiate call: %w", err)
 	}
@@ -394,7 +397,7 @@ func (t *TwilioCallManager) HangUp(callSID string) error {
 	req.SetBasicAuth(t.accountSID, t.authToken)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClientWithTimeout.Do(req)
 	if err != nil {
 		return err
 	}
@@ -415,7 +418,7 @@ func (t *TwilioCallManager) GetBalance() (float64, error) {
 
 	req.SetBasicAuth(t.accountSID, t.authToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClientWithTimeout.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -445,7 +448,7 @@ func (t *TwilioCallManager) GetCallStatus(callSID string) (string, error) {
 
 	req.SetBasicAuth(t.accountSID, t.authToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClientWithTimeout.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -462,7 +465,7 @@ func (t *TwilioCallManager) GetCallStatus(callSID string) (string, error) {
 	return result.Status, nil
 }
 
-// ValidateRequest validates that a request came from Twilio
+// ValidateRequest validates that a request came from Twilio using HMAC-SHA1 signature
 func (t *TwilioCallManager) ValidateRequest(r *http.Request) bool {
 	signature := r.Header.Get("X-Twilio-Signature")
 	if signature == "" {
@@ -473,7 +476,9 @@ func (t *TwilioCallManager) ValidateRequest(r *http.Request) bool {
 	fullURL := t.baseURL + r.URL.Path
 
 	// Get POST parameters
-	r.ParseForm()
+	if err := r.ParseForm(); err != nil {
+		return false
+	}
 	params := make(map[string]string)
 	for key, values := range r.PostForm {
 		if len(values) > 0 {
@@ -484,55 +489,25 @@ func (t *TwilioCallManager) ValidateRequest(r *http.Request) bool {
 	// Calculate expected signature
 	expectedSig := t.calculateSignature(fullURL, params)
 
-	return signature == expectedSig
+	return subtle.ConstantTimeCompare([]byte(signature), []byte(expectedSig)) == 1
 }
 
-func (t *TwilioCallManager) calculateSignature(url string, params map[string]string) string {
+func (t *TwilioCallManager) calculateSignature(fullURL string, params map[string]string) string {
 	// Sort params and append to URL
-	data := url
+	data := fullURL
 	keys := make([]string, 0, len(params))
 	for k := range params {
 		keys = append(keys, k)
 	}
-	// sort.Strings(keys) // Would need to import sort
+	sort.Strings(keys)
 	for _, k := range keys {
 		data += k + params[k]
 	}
 
 	// HMAC-SHA1
-	h := hmacSHA1([]byte(t.authToken), []byte(data))
-	return base64.StdEncoding.EncodeToString(h)
-}
-
-func hmacSHA1(key, data []byte) []byte {
-	mac := hmacNew(sha1Sum, key)
-	mac.Write(data)
-	return mac.Sum(nil)
-}
-
-// Simplified HMAC implementation
-func hmacNew(hash func([]byte) []byte, key []byte) *hmacWriter {
-	return &hmacWriter{key: key, hash: hash}
-}
-
-type hmacWriter struct {
-	key  []byte
-	hash func([]byte) []byte
-	buf  bytes.Buffer
-}
-
-func (h *hmacWriter) Write(p []byte) (n int, err error) {
-	return h.buf.Write(p)
-}
-
-func (h *hmacWriter) Sum(in []byte) []byte {
-	// Simplified - in production use crypto/hmac
-	return h.hash(append(h.key, h.buf.Bytes()...))
-}
-
-func sha1Sum(data []byte) []byte {
-	// Placeholder - in production use crypto/sha1
-	return data
+	mac := hmac.New(sha1.New, []byte(t.authToken))
+	mac.Write([]byte(data))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func truncateForTelegram(s string, n int) string {
