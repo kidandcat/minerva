@@ -363,17 +363,19 @@ func handleSendCLI(config *Config, args []string) {
 		os.Exit(1)
 	}
 
-	msg := tgbotapi.NewMessage(config.AdminID, message)
-	msg.ParseMode = "Markdown"
-	_, err = api.Send(msg)
-	if err != nil {
-		// Retry without Markdown
-		msg.ParseMode = ""
+	chunks := splitMessage(message, 4096)
+	for _, chunk := range chunks {
+		msg := tgbotapi.NewMessage(config.AdminID, chunk)
+		msg.ParseMode = "Markdown"
 		_, err = api.Send(msg)
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to send message: %v\n", err)
-		os.Exit(1)
+		if err != nil {
+			msg.ParseMode = ""
+			_, err = api.Send(msg)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to send message: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	result, _ := json.Marshal(map[string]any{

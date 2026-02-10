@@ -667,16 +667,50 @@ func (b *Bot) sendMessage(chatID int64, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	msg := tgbotapi.NewMessage(chatID, text)
-	// Try Markdown first, fall back to plain text if it fails
-	msg.ParseMode = "Markdown"
-	_, err := b.api.Send(msg)
-	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
-		// Retry without Markdown
-		msg.ParseMode = ""
-		_, err = b.api.Send(msg)
+	chunks := splitMessage(text, 4096)
+	for _, chunk := range chunks {
+		msg := tgbotapi.NewMessage(chatID, chunk)
+		msg.ParseMode = "Markdown"
+		_, err := b.api.Send(msg)
+		if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+			msg.ParseMode = ""
+			_, err = b.api.Send(msg)
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return err
+	return nil
+}
+
+// splitMessage splits text into chunks of at most maxLen characters,
+// preferring to break at newlines, then at spaces, to avoid cutting mid-sentence.
+func splitMessage(text string, maxLen int) []string {
+	if len(text) <= maxLen {
+		return []string{text}
+	}
+	var chunks []string
+	for len(text) > 0 {
+		if len(text) <= maxLen {
+			chunks = append(chunks, text)
+			break
+		}
+		chunk := text[:maxLen]
+		// Prefer breaking at last newline
+		if idx := strings.LastIndex(chunk, "\n"); idx > maxLen/4 {
+			chunks = append(chunks, text[:idx])
+			text = text[idx+1:]
+		} else if idx := strings.LastIndex(chunk, " "); idx > maxLen/4 {
+			// Fall back to last space
+			chunks = append(chunks, text[:idx])
+			text = text[idx+1:]
+		} else {
+			// No good break point, hard cut
+			chunks = append(chunks, chunk)
+			text = text[maxLen:]
+		}
+	}
+	return chunks
 }
 
 func (b *Bot) sendDocument(chatID int64, filename string, data []byte) error {
