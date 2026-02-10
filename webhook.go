@@ -78,7 +78,6 @@ func (w *WebhookServer) Start() error {
 	rl := w.rateLimiter.Middleware
 	body := func(next http.HandlerFunc) http.HandlerFunc { return maxBodyMiddleware(maxBodySize, next) }
 	bigBody := func(next http.HandlerFunc) http.HandlerFunc { return maxBodyMiddleware(maxEmailBodySize, next) }
-	auth := func(next http.HandlerFunc) http.HandlerFunc { return authMiddleware(w.config.AgentPassword, next) }
 	wsAuth := func(next http.HandlerFunc) http.HandlerFunc {
 		return wsAuthMiddleware(w.config.AgentPassword, w.allowedOrigins, next)
 	}
@@ -107,23 +106,23 @@ func (w *WebhookServer) Start() error {
 	if w.voiceManager != nil {
 		http.HandleFunc("/voice/incoming", chainMiddleware(w.voiceManager.HandleIncoming, rl, body, twilioAuth))
 		http.HandleFunc("/voice/ws", chainMiddleware(w.voiceManager.HandleMediaStream, rl))
-		http.HandleFunc("/voice/call", chainMiddleware(w.handleVoiceCall, rl, body, auth))
+		http.HandleFunc("/voice/call", chainMiddleware(w.handleVoiceCall, rl, body, localhostOnly))
 		log.Println("Voice AI endpoints: /voice/incoming, /voice/ws, /voice/call")
 	}
 
 	// Android Phone Bridge endpoint (auth required)
 	if w.phoneBridge != nil {
 		http.HandleFunc("/phone/ws", chainMiddleware(w.phoneBridge.HandleWebSocket, rl, wsAuth))
-		http.HandleFunc("/phone/list", chainMiddleware(w.handlePhoneList, rl, auth))
-		http.HandleFunc("/phone/call", chainMiddleware(w.handlePhoneCall, rl, body, auth))
+		http.HandleFunc("/phone/list", chainMiddleware(w.handlePhoneList, rl, localhostOnly))
+		http.HandleFunc("/phone/call", chainMiddleware(w.handlePhoneCall, rl, body, localhostOnly))
 		log.Println("Phone Bridge endpoints: /phone/ws, /phone/list, /phone/call")
 	}
 
 	// Agent WebSocket endpoint (auth required)
 	if w.agentHub != nil {
 		http.HandleFunc("/agent", chainMiddleware(w.agentHub.HandleWebSocket, rl, wsAuth))
-		http.HandleFunc("/agent/list", chainMiddleware(w.handleAgentList, rl, auth))
-		http.HandleFunc("/agent/run", chainMiddleware(w.handleAgentRun, rl, body, auth))
+		http.HandleFunc("/agent/list", chainMiddleware(w.handleAgentList, rl, localhostOnly))
+		http.HandleFunc("/agent/run", chainMiddleware(w.handleAgentRun, rl, body, localhostOnly))
 		log.Println("Agent WebSocket endpoint: /agent (auth required)")
 		log.Println("Agent API endpoints: /agent/list, /agent/run (auth required)")
 	}

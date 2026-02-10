@@ -19,27 +19,20 @@ import (
 
 // Security middleware and helpers
 
-// authMiddleware checks for a valid API key (the agent password) via Bearer token.
-// Endpoints wrapped with this require: Authorization: Bearer <AGENT_PASSWORD>
-func authMiddleware(password string, next http.HandlerFunc) http.HandlerFunc {
+// localhostOnly rejects any request that doesn't come from localhost.
+// Used for CLI-only endpoints that should never be exposed externally.
+func localhostOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if password == "" {
-			log.Printf("[Security] WARNING: No AGENT_PASSWORD set, rejecting authenticated request to %s", r.URL.Path)
-			http.Error(w, `{"error": "server misconfigured: no auth secret set"}`, http.StatusInternalServerError)
+		// If there's an X-Forwarded-For header, it came through Caddy (external)
+		if r.Header.Get("X-Forwarded-For") != "" {
+			http.Error(w, `{"error": "not found"}`, http.StatusNotFound)
 			return
 		}
-
-		token := extractBearerToken(r)
-		if token == "" {
-			http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
+		host := r.RemoteAddr
+		if !strings.HasPrefix(host, "127.0.0.1:") && !strings.HasPrefix(host, "[::1]:") {
+			http.Error(w, `{"error": "not found"}`, http.StatusNotFound)
 			return
 		}
-
-		if subtle.ConstantTimeCompare([]byte(token), []byte(password)) != 1 {
-			http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-
 		next(w, r)
 	}
 }
