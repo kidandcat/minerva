@@ -267,6 +267,8 @@
             border-radius: 14px;
             padding: 2.5rem;
             overflow-x: auto;
+            text-align: center;
+            max-width: 100%;
         }
         .arch-diagram {
             font-family: 'SF Mono', 'Fira Code', monospace;
@@ -274,7 +276,7 @@
             line-height: 1.5;
             color: var(--text-muted);
             white-space: pre;
-            min-width: 600px;
+            display: inline-block;
             text-align: left;
         }
         .arch-diagram .highlight { color: var(--accent-2); font-weight: 600; }
@@ -415,7 +417,8 @@
             .hero { padding: 8rem 1.2rem 4rem; }
             section { padding: 3rem 1.2rem; }
             .features-grid { grid-template-columns: 1fr; }
-            .arch-container { padding: 1.2rem; }
+            .arch-container { padding: 1rem; }
+            .arch-diagram { font-size: 0.58rem; }
             .quickstart-body { padding: 1rem 1.2rem; font-size: 0.8rem; }
             .tools-grid { grid-template-columns: 1fr; }
             .footer-links { flex-direction: column; gap: 0.8rem; }
@@ -424,6 +427,7 @@
         @media (max-width: 480px) {
             .hero h1 { font-size: 2rem; }
             .hero-actions { flex-direction: column; align-items: center; }
+            .arch-diagram { font-size: 0.45rem; }
         }
     </style>
 </head>
@@ -548,7 +552,7 @@
 <span class="rose">└──────────────┘</span>     │  └────────────────────┘  │     <span class="amber">└─────────────┘</span>
                      │                          │
 <span class="blue">┌──────────────┐</span>     │  ┌────────────────────┐  │     <span class="green">┌─────────────┐</span>
-<span class="blue">│ Twilio/Phone │</span>◄───►│  │     SQLite DB      │  │◄───►<span class="green">│ Gemini Live │</span>
+<span class="blue">│ Telnyx/Phone │</span>◄───►│  │     SQLite DB      │  │◄───►<span class="green">│ Gemini Live │</span>
 <span class="blue">│  (voice)     │</span>     │  └────────────────────┘  │     <span class="green">│ (voice AI)  │</span>
 <span class="blue">└──────────────┘</span>     └──────────────────────────┘     <span class="green">└─────────────┘</span></div>
     </div>
@@ -638,7 +642,7 @@
         </div>
         <div class="tool-item">
             <code>make_call</code>
-            <span>Initiate voice calls via Twilio with real-time Gemini AI</span>
+            <span>Initiate voice calls via Telnyx with real-time Gemini AI</span>
         </div>
         <div class="tool-item">
             <code>run_claude</code>
