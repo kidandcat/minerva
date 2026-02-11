@@ -155,7 +155,7 @@ Usage:
   minerva context                      Get recent conversation context
   minerva agent list                   List connected agents and their projects
   minerva agent run <name> "prompt" [--dir /path]  Run a task on an agent
-  minerva email send <to> --subject "subject" --body "body"  Send email via Resend
+  minerva email send <to> --subject "subject" --body "body" [--from "sender"]  Send email via Resend
   minerva call <number> "purpose"      Make a phone call (via Twilio)
   minerva phone list                   List connected Android phones
   minerva phone call <number> "purpose"  Make a call via Android phone
@@ -328,11 +328,7 @@ func handleAgentCLI(config *Config, args []string) {
 	subcmd := args[0]
 	subargs := args[1:]
 
-	// Default to localhost webhook server (port 8081)
-	baseURL := "http://localhost:8081"
-	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
-		baseURL = envURL
-	}
+	baseURL := config.CLIBaseURL()
 
 	switch subcmd {
 	case "list":
@@ -398,18 +394,21 @@ func handleEmailCLI(config *Config, args []string) {
 	switch subcmd {
 	case "send":
 		if len(subargs) < 1 {
-			fmt.Fprintf(os.Stderr, "error: usage: minerva email send <to> --subject \"subject\" --body \"body\"\n")
+			fmt.Fprintf(os.Stderr, "error: usage: minerva email send <to> --subject \"subject\" --body \"body\" [--from \"sender\"]\n")
 			os.Exit(1)
 		}
 
 		to := subargs[0]
-		var subject, body string
+		var subject, body, from string
 		for i, arg := range subargs {
 			if arg == "--subject" && i+1 < len(subargs) {
 				subject = subargs[i+1]
 			}
 			if arg == "--body" && i+1 < len(subargs) {
 				body = subargs[i+1]
+			}
+			if arg == "--from" && i+1 < len(subargs) {
+				from = subargs[i+1]
 			}
 		}
 
@@ -428,12 +427,22 @@ func handleEmailCLI(config *Config, args []string) {
 		}
 
 		tools.SetResendAPIKey(config.ResendAPIKey)
+		if config.FromEmail != "" {
+			tools.SetFromEmail(config.FromEmail)
+		}
+		if len(config.VerifiedEmailDomains) > 0 {
+			tools.SetVerifiedDomains(config.VerifiedEmailDomains)
+		}
 
-		argsJSON, _ := json.Marshal(map[string]string{
+		emailArgs := map[string]string{
 			"to":      to,
 			"subject": subject,
 			"body":    body,
-		})
+		}
+		if from != "" {
+			emailArgs["from"] = from
+		}
+		argsJSON, _ := json.Marshal(emailArgs)
 
 		result, err := tools.SendEmail(string(argsJSON))
 		if err != nil {
@@ -458,11 +467,7 @@ func handleCallCLI(config *Config, args []string) {
 	phoneNumber := args[0]
 	purpose := args[1]
 
-	// Default to localhost webhook server (port 8081)
-	baseURL := "http://localhost:8081"
-	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
-		baseURL = envURL
-	}
+	baseURL := config.CLIBaseURL()
 
 	reqBody, _ := json.Marshal(map[string]string{
 		"to":      phoneNumber,
@@ -489,11 +494,7 @@ func handlePhoneCLI(config *Config, args []string) {
 	subcmd := args[0]
 	subargs := args[1:]
 
-	// Default to localhost webhook server (port 8081)
-	baseURL := "http://localhost:8081"
-	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
-		baseURL = envURL
-	}
+	baseURL := config.CLIBaseURL()
 
 	switch subcmd {
 	case "list":

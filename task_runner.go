@@ -11,18 +11,18 @@ import (
 )
 
 const (
-	TasksDir    = "/home/ubuntu/minerva-tasks"
 	TaskTimeout = 24 * time.Hour
 )
 
 // TaskRunner manages background tasks
 type TaskRunner struct {
-	bot *Bot
+	bot      *Bot
+	tasksDir string
 }
 
 // NewTaskRunner creates a new task runner
-func NewTaskRunner(bot *Bot) *TaskRunner {
-	return &TaskRunner{bot: bot}
+func NewTaskRunner(bot *Bot, tasksDir string) *TaskRunner {
+	return &TaskRunner{bot: bot, tasksDir: tasksDir}
 }
 
 // CreateTask creates a new task and launches Claude Code
@@ -31,7 +31,7 @@ func (tr *TaskRunner) CreateTask(userID int64, description string) (string, erro
 	taskID := fmt.Sprintf("task_%d", time.Now().UnixNano())
 
 	// Create task directory
-	taskDir := filepath.Join(TasksDir, taskID)
+	taskDir := filepath.Join(tr.tasksDir, taskID)
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create task directory: %w", err)
 	}
@@ -110,7 +110,7 @@ func (tr *TaskRunner) LaunchTaskAsync(userID int64, description string) (string,
 	taskID := fmt.Sprintf("task_%d", time.Now().UnixNano())
 
 	// Create task directory
-	taskDir := filepath.Join(TasksDir, taskID)
+	taskDir := filepath.Join(tr.tasksDir, taskID)
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create task directory: %w", err)
 	}
@@ -210,7 +210,7 @@ func (tr *TaskRunner) monitorTask(cmd *exec.Cmd, taskID string, userID int64, ta
 
 // GetTaskProgress reads the PROGRESS.md file for a task
 func (tr *TaskRunner) GetTaskProgress(taskID string) (string, error) {
-	progressFile := filepath.Join(TasksDir, taskID, "PROGRESS.md")
+	progressFile := filepath.Join(tr.tasksDir, taskID, "PROGRESS.md")
 	content, err := os.ReadFile(progressFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -266,7 +266,7 @@ func (tr *TaskRunner) ResumeTask(taskID string, userID int64) error {
 		return fmt.Errorf("task is already running")
 	}
 
-	taskDir := filepath.Join(TasksDir, taskID)
+	taskDir := filepath.Join(tr.tasksDir, taskID)
 
 	// Check if task directory exists
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {

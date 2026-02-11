@@ -58,7 +58,12 @@ func StartServer(config *Config) error {
 	// Initialize email
 	if config.ResendAPIKey != "" {
 		tools.SetResendAPIKey(config.ResendAPIKey)
-		tools.SetFromEmail(config.FromEmail)
+		if config.FromEmail != "" {
+			tools.SetFromEmail(config.FromEmail)
+		}
+		if len(config.VerifiedEmailDomains) > 0 {
+			tools.SetVerifiedDomains(config.VerifiedEmailDomains)
+		}
 		log.Println("Email (Resend) configured")
 		if config.ResendWebhookSecret == "" {
 			log.Println("WARNING: RESEND_WEBHOOK_SECRET not set - email webhooks will reject all requests")
@@ -78,7 +83,7 @@ func StartServer(config *Config) error {
 	log.Println("Bot created")
 
 	// Initialize task runner
-	bot.taskRunner = NewTaskRunner(bot)
+	bot.taskRunner = NewTaskRunner(bot, config.TasksDir)
 	log.Println("Task runner initialized")
 
 	// Initialize agent hub with notification callback
@@ -145,7 +150,8 @@ func StartServer(config *Config) error {
 	if config.GoogleAPIKey != "" {
 		state.voiceManager = NewVoiceManager(bot, config.GoogleAPIKey, config.BaseURL,
 			config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber,
-			config.OwnerName, config.DefaultCountryCode)
+			config.OwnerName, config.DefaultCountryCode,
+			config.GeminiModel, config.GeminiVoice, config.VoiceLanguage)
 		log.Println("Voice AI (Gemini Live) configured")
 	}
 

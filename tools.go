@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"minerva/tools"
 )
@@ -187,31 +188,7 @@ func GetToolDefinitions() []Tool {
 				},
 			},
 		},
-		{
-			Type: "function",
-			Function: ToolFunction{
-				Name:        "send_email",
-				Description: "Send an email on behalf of the user. Use this when the user wants to send an email to someone.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"to": map[string]any{
-							"type":        "string",
-							"description": "Recipient email address",
-						},
-						"subject": map[string]any{
-							"type":        "string",
-							"description": "Email subject line",
-						},
-						"body": map[string]any{
-							"type":        "string",
-							"description": "Email body content (plain text)",
-						},
-					},
-					"required": []string{"to", "subject", "body"},
-				},
-			},
-		},
+		buildEmailToolDef(),
 		{
 			Type: "function",
 			Function: ToolFunction{
@@ -301,6 +278,46 @@ func GetToolDefinitions() []Tool {
 					},
 					"required": []string{"agent", "prompt"},
 				},
+			},
+		},
+	}
+}
+
+func buildEmailToolDef() Tool {
+	domains := tools.GetVerifiedDomains()
+	domainStr := ""
+	fromDesc := "Sender email address (optional). Format: 'Name <email@domain>' or 'email@domain'."
+	if len(domains) > 0 {
+		domainStr = " You can send from any verified domain: " + strings.Join(domains, " or ") + "."
+		fromDesc += " Must use a verified domain (" + strings.Join(domains, " or ") + ")."
+	}
+
+	return Tool{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "send_email",
+			Description: "Send an email on behalf of the user. Use this when the user wants to send an email to someone." + domainStr,
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"to": map[string]any{
+						"type":        "string",
+						"description": "Recipient email address",
+					},
+					"subject": map[string]any{
+						"type":        "string",
+						"description": "Email subject line",
+					},
+					"body": map[string]any{
+						"type":        "string",
+						"description": "Email body content (plain text)",
+					},
+					"from": map[string]any{
+						"type":        "string",
+						"description": fromDesc,
+					},
+				},
+				"required": []string{"to", "subject", "body"},
 			},
 		},
 	}

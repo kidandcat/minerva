@@ -17,12 +17,11 @@ import (
 
 const (
 	geminiWSURL      = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-	geminiModel      = "models/gemini-2.5-flash-native-audio-latest"
-	geminiVoice      = "Zephyr"
 	voiceCallTimeout = 5 * time.Minute
 )
 
-func buildIncomingVoicePrompt(ownerName string) string {
+func buildIncomingVoicePrompt(ownerName, voiceLanguage string) string {
+	langInstruction := fmt.Sprintf("Speak in %s by default, switch to the caller's language if they speak a different one", voiceLanguage)
 	return fmt.Sprintf(`You are Minerva, %s's personal AI assistant. You are answering an incoming phone call.
 
 YOUR ROLE ON THIS CALL:
@@ -34,11 +33,11 @@ YOUR ROLE ON THIS CALL:
 - Never give out personal information (address, schedule, etc.)
 
 KEY BEHAVIORS:
-- Speak in Spanish by default, switch to English if the caller speaks English
+- %s
 - Be natural and conversational - this is a real phone call
 - Keep responses short and clear
 - Be warm, helpful, and professional
-- If unsure about something, say you'll check with %s and get back to them`, ownerName, ownerName, ownerName, ownerName)
+- If unsure about something, say you'll check with %s and get back to them`, ownerName, ownerName, ownerName, langInstruction, ownerName)
 }
 
 // VoiceManager handles voice calls via Twilio Media Streams + Gemini Live API
@@ -51,6 +50,9 @@ type VoiceManager struct {
 	twilioPhone        string
 	ownerName          string
 	defaultCountryCode string
+	geminiModel        string
+	geminiVoice        string
+	voiceLanguage      string
 	activeCalls        sync.Map
 	pendingCalls       sync.Map // callSID → system prompt override for outbound calls
 }
@@ -166,7 +168,7 @@ type geminiServerMsg struct {
 	} `json:"serverContent,omitempty"`
 }
 
-func NewVoiceManager(bot *Bot, apiKey, baseURL, twilioSID, twilioToken, twilioPhone, ownerName, defaultCountryCode string) *VoiceManager {
+func NewVoiceManager(bot *Bot, apiKey, baseURL, twilioSID, twilioToken, twilioPhone, ownerName, defaultCountryCode, geminiModel, geminiVoice, voiceLanguage string) *VoiceManager {
 	return &VoiceManager{
 		bot:                bot,
 		apiKey:             apiKey,
@@ -176,6 +178,9 @@ func NewVoiceManager(bot *Bot, apiKey, baseURL, twilioSID, twilioToken, twilioPh
 		twilioPhone:        twilioPhone,
 		ownerName:          ownerName,
 		defaultCountryCode: defaultCountryCode,
+		geminiModel:        geminiModel,
+		geminiVoice:        geminiVoice,
+		voiceLanguage:      voiceLanguage,
 	}
 }
 
@@ -324,15 +329,15 @@ func (v *VoiceManager) connectGemini(session *voiceSession) error {
 	session.geminiConn = conn
 
 	// Build setup message
-	prompt := buildIncomingVoicePrompt(v.ownerName)
+	prompt := buildIncomingVoicePrompt(v.ownerName, v.voiceLanguage)
 	if session.systemPrompt != "" {
 		prompt = session.systemPrompt
 	}
 
 	var setup geminiSetupMsg
-	setup.Setup.Model = geminiModel
+	setup.Setup.Model = v.geminiModel
 	setup.Setup.GenerationConfig.ResponseModalities = "audio"
-	setup.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName = geminiVoice
+	setup.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName = v.geminiVoice
 	setup.Setup.SystemInstruction = geminiContent{
 		Parts: []geminiPart{{Text: prompt}},
 	}
@@ -551,14 +556,14 @@ YOUR TASK FOR THIS CALL:
 %s
 
 Key behaviors:
-- Speak in Spanish (unless the other person speaks a different language)
+- Speak in %s (unless the other person speaks a different language)
 - Be natural and conversational, like a real phone call
 - Keep responses concise - this is a phone call, not a chat
 - Be warm, professional, and polite
 - When the person answers, introduce yourself briefly
 - Then proceed with your task
 - If you accomplish the task or get the information needed, thank them and end the call politely
-- If you encounter issues, explain you'll let %s know and end the call`, v.ownerName, purpose, v.ownerName)
+- If you encounter issues, explain you'll let %s know and end the call`, v.ownerName, purpose, v.voiceLanguage, v.ownerName)
 
 	// Make the call via Twilio API
 	callURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Calls.json", v.twilioSID)

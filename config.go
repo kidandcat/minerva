@@ -10,6 +10,14 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// CLIBaseURL returns the base URL for CLI commands to connect to the local server
+func (c *Config) CLIBaseURL() string {
+	if envURL := os.Getenv("MINERVA_URL"); envURL != "" {
+		return envURL
+	}
+	return fmt.Sprintf("http://localhost:%d", c.WebhookPort)
+}
+
 // Config holds all configuration for the Minerva bot
 type Config struct {
 	TelegramBotToken   string
@@ -28,6 +36,11 @@ type Config struct {
 	FromEmail            string // Email sender address (e.g., Minerva <minerva@example.com>)
 	OwnerName            string // Name of the assistant owner (used in voice prompts)
 	DefaultCountryCode   string // Default country code for phone numbers (e.g., +34)
+	VerifiedEmailDomains []string // Verified email domains for sending (e.g., example.com)
+	TasksDir             string // Directory for background tasks
+	GeminiModel          string // Gemini model for voice calls
+	GeminiVoice          string // Gemini voice name for voice calls
+	VoiceLanguage        string // Default language for voice calls (e.g., "Spanish", "English")
 }
 
 // LoadConfig loads configuration from environment variables
@@ -35,6 +48,20 @@ func LoadConfig() (*Config, error) {
 	// Load .env file (overrides existing env vars)
 	_ = godotenv.Overload()
 
+	config := loadConfigCommon()
+	return config, nil
+}
+
+// LoadConfigForCLI loads configuration without requiring bot tokens
+func LoadConfigForCLI() (*Config, error) {
+	// Load .env file (overrides existing env vars)
+	_ = godotenv.Overload()
+
+	config := loadConfigCommon()
+	return config, nil
+}
+
+func loadConfigCommon() *Config {
 	config := &Config{
 		TelegramBotToken:   os.Getenv("TELEGRAM_BOT_TOKEN"),
 		DatabasePath:       getEnvOrDefault("DATABASE_PATH", "./minerva.db"),
@@ -49,39 +76,27 @@ func LoadConfig() (*Config, error) {
 		AgentPassword:      os.Getenv("AGENT_PASSWORD"),
 		GoogleAPIKey:       os.Getenv("GOOGLE_API_KEY"),
 		BaseURL:            os.Getenv("BASE_URL"),
-		FromEmail:          getEnvOrDefault("FROM_EMAIL", "Minerva <minerva@example.com>"),
+		FromEmail:          getEnvOrDefault("FROM_EMAIL", ""),
 		OwnerName:          getEnvOrDefault("OWNER_NAME", "the owner"),
 		DefaultCountryCode: getEnvOrDefault("DEFAULT_COUNTRY_CODE", "+1"),
+		TasksDir:           getEnvOrDefault("TASKS_DIR", "./minerva-tasks"),
+		GeminiModel:        getEnvOrDefault("GEMINI_MODEL", "models/gemini-2.5-flash-native-audio-latest"),
+		GeminiVoice:        getEnvOrDefault("GEMINI_VOICE", "Zephyr"),
+		VoiceLanguage:      getEnvOrDefault("VOICE_LANGUAGE", "Spanish"),
 	}
 
-	return config, nil
-}
-
-// LoadConfigForCLI loads configuration without requiring bot tokens
-func LoadConfigForCLI() (*Config, error) {
-	// Load .env file (overrides existing env vars)
-	_ = godotenv.Overload()
-
-	config := &Config{
-		TelegramBotToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
-		DatabasePath:        getEnvOrDefault("DATABASE_PATH", "./minerva.db"),
-		MaxContextMessages:  getEnvAsIntOrDefault("MAX_CONTEXT_MESSAGES", 20),
-		AdminID:             int64(getEnvAsIntOrDefault("ADMIN_ID", 0)),
-		ResendAPIKey:        os.Getenv("RESEND_API_KEY"),
-		ResendWebhookSecret: os.Getenv("RESEND_WEBHOOK_SECRET"),
-		WebhookPort:         getEnvAsIntOrDefault("WEBHOOK_PORT", 8080),
-		TwilioAccountSID:    os.Getenv("TWILIO_ACCOUNT_SID"),
-		TwilioAuthToken:     os.Getenv("TWILIO_AUTH_TOKEN"),
-		TwilioPhoneNumber:   os.Getenv("TWILIO_PHONE_NUMBER"),
-		AgentPassword:       os.Getenv("AGENT_PASSWORD"),
-		GoogleAPIKey:        os.Getenv("GOOGLE_API_KEY"),
-		BaseURL:             os.Getenv("BASE_URL"),
-		FromEmail:           getEnvOrDefault("FROM_EMAIL", "Minerva <minerva@example.com>"),
-		OwnerName:           getEnvOrDefault("OWNER_NAME", "the owner"),
-		DefaultCountryCode:  getEnvOrDefault("DEFAULT_COUNTRY_CODE", "+1"),
+	// Parse verified email domains
+	domainsStr := os.Getenv("VERIFIED_EMAIL_DOMAINS")
+	if domainsStr != "" {
+		for _, d := range strings.Split(domainsStr, ",") {
+			d = strings.TrimSpace(d)
+			if d != "" {
+				config.VerifiedEmailDomains = append(config.VerifiedEmailDomains, d)
+			}
+		}
 	}
 
-	return config, nil
+	return config
 }
 
 // updateEnvFile updates or adds a key=value pair in the .env file

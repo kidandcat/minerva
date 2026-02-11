@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,17 @@ type SendEmailArgs struct {
 	To      string `json:"to"`
 	Subject string `json:"subject"`
 	Body    string `json:"body"`
+	From    string `json:"from,omitempty"`
+}
+
+var verifiedDomains []string
+
+func SetVerifiedDomains(domains []string) {
+	verifiedDomains = domains
+}
+
+func GetVerifiedDomains() []string {
+	return verifiedDomains
 }
 
 type ResendRequest struct {
@@ -33,7 +45,7 @@ type ResendError struct {
 }
 
 var resendAPIKey string
-var fromEmail = "Minerva <minerva@example.com>"
+var fromEmail string
 
 func SetResendAPIKey(key string) {
 	resendAPIKey = key
@@ -63,9 +75,40 @@ func SendEmail(arguments string) (string, error) {
 		return "", fmt.Errorf("Resend API key not configured")
 	}
 
+	// Determine sender address
+	sender := fromEmail
+	if sender == "" && args.From == "" {
+		return "", fmt.Errorf("no sender address configured (set FROM_EMAIL in .env or provide 'from' parameter)")
+	}
+	if args.From != "" {
+		// Extract domain from the from address (handle "Name <email>" format)
+		addr := args.From
+		if idx := strings.Index(addr, "<"); idx != -1 {
+			addr = strings.TrimRight(addr[idx+1:], ">")
+		}
+		parts := strings.Split(addr, "@")
+		if len(parts) != 2 {
+			return "", fmt.Errorf("invalid 'from' address: %s", args.From)
+		}
+		domain := strings.ToLower(parts[1])
+		if len(verifiedDomains) > 0 {
+			valid := false
+			for _, d := range verifiedDomains {
+				if domain == d {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return "", fmt.Errorf("domain %q is not verified in Resend (allowed: %s)", domain, strings.Join(verifiedDomains, ", "))
+			}
+		}
+		sender = args.From
+	}
+
 	// Prepare request
 	reqBody := ResendRequest{
-		From:    fromEmail,
+		From:    sender,
 		To:      []string{args.To},
 		Subject: args.Subject,
 		Text:    args.Body,
@@ -97,7 +140,10 @@ func SendEmail(arguments string) (string, error) {
 	if resp.StatusCode != 200 {
 		var resendErr ResendError
 		json.Unmarshal(body, &resendErr)
-		return "", fmt.Errorf("failed to send email (status %d)", resp.StatusCode)
+		if resendErr.Message != "" {
+			return "", fmt.Errorf("failed to send email (status %d): %s", resp.StatusCode, resendErr.Message)
+		}
+		return "", fmt.Errorf("failed to send email (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	var resendResp ResendResponse

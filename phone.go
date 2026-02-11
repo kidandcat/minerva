@@ -265,20 +265,24 @@ func (d *PhoneDevice) handleCallActive() {
 
 	// Connect to Gemini Live
 	ownerName := "the owner"
+	voiceLanguage := "Spanish"
 	if d.bridge.bot.config != nil {
 		ownerName = d.bridge.bot.config.OwnerName
 	}
+	if d.bridge.voiceManager != nil {
+		voiceLanguage = d.bridge.voiceManager.voiceLanguage
+	}
 	var prompt string
 	if session.direction == "incoming" {
-		prompt = buildIncomingVoicePrompt(ownerName)
+		prompt = buildIncomingVoicePrompt(ownerName, voiceLanguage)
 	} else {
 		prompt = fmt.Sprintf(`You are Minerva, %s's AI assistant. You are making an outbound call.
 
 Key behaviors:
-- Speak in Spanish
+- Speak in %s
 - Be natural and conversational
 - Introduce yourself briefly
-- Be warm and professional`, ownerName)
+- Be warm and professional`, ownerName, voiceLanguage)
 	}
 
 	if err := d.connectGemini(session, prompt); err != nil {
@@ -370,10 +374,16 @@ func (d *PhoneDevice) connectGemini(session *phoneSession, prompt string) error 
 	session.mu.Unlock()
 
 	// Send setup message
+	gemModel := "models/gemini-2.5-flash-native-audio-latest"
+	gemVoice := "Zephyr"
+	if d.bridge.voiceManager != nil {
+		gemModel = d.bridge.voiceManager.geminiModel
+		gemVoice = d.bridge.voiceManager.geminiVoice
+	}
 	var setup geminiSetupMsg
-	setup.Setup.Model = geminiModel
+	setup.Setup.Model = gemModel
 	setup.Setup.GenerationConfig.ResponseModalities = "audio"
-	setup.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName = geminiVoice
+	setup.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName = gemVoice
 	setup.Setup.SystemInstruction = geminiContent{
 		Parts: []geminiPart{{Text: prompt}},
 	}
