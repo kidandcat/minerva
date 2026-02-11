@@ -459,7 +459,7 @@
     </div>
     <h1 class="fade-up delay-1">Your personal<br><span class="gradient">AI command center</span></h1>
     <p class="fade-up delay-2">
-        Minerva is a self-hosted AI assistant that lives in Telegram. Powered by Claude, it manages your reminders, makes phone calls, sends emails, delegates coding tasks to remote agents, and remembers everything about you.
+        Minerva is a self-hosted AI assistant that lives in Telegram. Powered by Claude, it makes phone calls, sends emails, schedules tasks, delegates coding work to remote agents, and remembers everything about you.
     </p>
     <div class="hero-actions fade-up delay-3">
         <a href="#quickstart" class="btn-primary">
@@ -524,8 +524,8 @@
             <div class="feature-icon purple">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
             </div>
-            <h3>Reminders &amp; Scheduling</h3>
-            <p>Schedule reminders and recurring tasks with natural language. The AI autonomously decides when to reschedule and handles follow-ups.</p>
+            <h3>Scheduled Tasks</h3>
+            <p>Schedule one-off or recurring tasks on remote agents — daily reports, weekly builds, automated maintenance. Managed via CLI or the AI brain.</p>
         </div>
     </div>
 </section>
@@ -645,8 +645,16 @@
             <span>Dispatch coding tasks to remote Claude Code agents</span>
         </div>
         <div class="tool-item">
+            <code>list_claude_projects</code>
+            <span>List projects available on connected agents</span>
+        </div>
+        <div class="tool-item">
             <code>create_task</code>
             <span>Launch long-running background tasks with progress tracking</span>
+        </div>
+        <div class="tool-item">
+            <code>get_task_progress</code>
+            <span>Check status and progress of running background tasks</span>
         </div>
         <div class="tool-item">
             <code>run_code</code>
@@ -663,28 +671,16 @@
 
     <div class="tools-grid">
         <div class="tool-item">
-            <code>/new</code>
-            <span>Start a fresh conversation</span>
+            <code>/start</code>
+            <span>Show welcome message and available commands</span>
         </div>
         <div class="tool-item">
-            <code>/history</code>
-            <span>Browse past conversations</span>
+            <code>/clear</code>
+            <span>Clear conversation context and start fresh</span>
         </div>
         <div class="tool-item">
-            <code>/system</code>
-            <span>Set custom AI behavior per user</span>
-        </div>
-        <div class="tool-item">
-            <code>/memory</code>
-            <span>View what Minerva remembers about you</span>
-        </div>
-        <div class="tool-item">
-            <code>/reminders</code>
-            <span>List and manage pending reminders</span>
-        </div>
-        <div class="tool-item">
-            <code>/tasks</code>
-            <span>View background task status and progress</span>
+            <code>/token</code>
+            <span>Update Claude OAuth token (admin only)</span>
         </div>
     </div>
 </section>
