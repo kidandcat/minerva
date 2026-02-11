@@ -541,10 +541,10 @@
     <p class="section-desc">One binary. One database. No orchestrators, no message queues, no YAML files. Minerva connects directly to the services it needs.</p>
 
     <div class="arch-container">
-        <div class="arch-diagram"><span class="highlight">┌──────────────┐</span>     ┌──────────────────────────┐     <span class="green">┌─────────────┐</span>
+        <div class="arch-diagram"><span class="highlight">┌──────────────┐</span>     ┌──────────────────────────┐     <span class="green">┌──────────────┐</span>
 <span class="highlight">│   Telegram   │</span>◄───►│    <span class="highlight">Minerva (Go binary)</span>   │◄───►<span class="green">│  Claude CLI  │</span>
 <span class="highlight">│   Bot API    │</span>     │                          │     <span class="green">│  (AI brain)  │</span>
-<span class="highlight">└──────────────┘</span>     │  ┌────────────────────┐  │     <span class="green">└─────────────┘</span>
+<span class="highlight">└──────────────┘</span>     │  ┌────────────────────┐  │     <span class="green">└──────────────┘</span>
                      │  │   Webhook Server   │  │
 <span class="rose">┌──────────────┐</span>     │  │  /email/webhook    │  │     <span class="amber">┌─────────────┐</span>
 <span class="rose">│   Resend     │</span>────►│  │  /agent (WS)       │  │◄───►<span class="amber">│  Remote     │</span>
