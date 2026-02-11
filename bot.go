@@ -22,7 +22,7 @@ type Bot struct {
 	ai             *AIClient
 	config         *Config
 	running        bool
-	twilioManager  *TwilioCallManager
+	voiceManager   *VoiceManager
 	taskRunner     *TaskRunner
 	agentHub       *AgentHub
 }

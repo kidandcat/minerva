@@ -387,6 +387,8 @@ func (d *PhoneDevice) connectGemini(session *phoneSession, prompt string) error 
 	setup.Setup.SystemInstruction = geminiContent{
 		Parts: []geminiPart{{Text: prompt}},
 	}
+	setup.Setup.InputAudioTranscription = &struct{}{}
+	setup.Setup.OutputAudioTranscription = &struct{}{}
 
 	if err := conn.WriteJSON(setup); err != nil {
 		conn.Close()
@@ -407,43 +409,62 @@ func (d *PhoneDevice) connectGemini(session *phoneSession, prompt string) error 
 }
 
 func (d *PhoneDevice) geminiToPhone(session *phoneSession) {
-	session.mu.Lock()
-	conn := session.geminiConn
-	session.mu.Unlock()
-
-	if conn == nil {
-		return
-	}
-
 	for {
 		session.mu.Lock()
 		closed := session.closed
+		conn := session.geminiConn
 		session.mu.Unlock()
 
-		if closed {
+		if closed || conn == nil {
 			return
 		}
 
 		var msg geminiServerMsg
 		if err := conn.ReadJSON(&msg); err != nil {
-			if !session.closed {
+			session.mu.Lock()
+			isClosed := session.closed
+			session.mu.Unlock()
+			if !isClosed {
 				log.Printf("[Phone] Gemini read error: %v", err)
 			}
 			return
 		}
 
+		if msg.ServerContent == nil {
+			continue
+		}
+
+		// Handle transcriptions
+		if msg.ServerContent.InputTranscription != nil && msg.ServerContent.InputTranscription.Text != "" {
+			text := msg.ServerContent.InputTranscription.Text
+			log.Printf("[Phone] User said: %s", text)
+			session.mu.Lock()
+			session.transcript = append(session.transcript, transcriptEntry{Speaker: "user", Text: text})
+			session.mu.Unlock()
+		}
+
+		if msg.ServerContent.OutputTranscription != nil && msg.ServerContent.OutputTranscription.Text != "" {
+			text := msg.ServerContent.OutputTranscription.Text
+			log.Printf("[Phone] Minerva said: %s", text)
+			session.mu.Lock()
+			session.transcript = append(session.transcript, transcriptEntry{Speaker: "assistant", Text: text})
+			session.mu.Unlock()
+		}
+
 		// Handle audio response
-		if msg.ServerContent != nil && msg.ServerContent.ModelTurn != nil {
+		if msg.ServerContent.ModelTurn != nil {
 			for _, part := range msg.ServerContent.ModelTurn.Parts {
-				if part.InlineData != nil && strings.HasPrefix(part.InlineData.MimeType, "audio/") {
+				if part.InlineData != nil && strings.HasPrefix(part.InlineData.MimeType, "audio/pcm") {
 					// Gemini sends 24kHz PCM, need to resample to 16kHz for Android
 					pcmData, err := base64.StdEncoding.DecodeString(part.InlineData.Data)
 					if err != nil {
 						continue
 					}
 
-					// Resample 24kHz to 16kHz
-					resampled := resample24to16(pcmData)
+					// Resample 24kHz → 16kHz using shared utility
+					pcmSamples := bytesToPCM(pcmData)
+					pcm16k := resampleLinear(pcmSamples, 24000, 16000)
+					resampled := pcmToBytes(pcm16k)
 					base64Audio := base64.StdEncoding.EncodeToString(resampled)
 
 					// Send to Android
@@ -458,16 +479,6 @@ func (d *PhoneDevice) geminiToPhone(session *phoneSession) {
 					default:
 						log.Printf("[Phone] Send buffer full, dropping audio")
 					}
-				}
-
-				// Track transcript
-				if part.Text != "" {
-					session.mu.Lock()
-					session.transcript = append(session.transcript, transcriptEntry{
-						Speaker: "assistant",
-						Text:    part.Text,
-					})
-					session.mu.Unlock()
 				}
 			}
 		}
@@ -564,21 +575,3 @@ func (p *PhoneBridge) unregisterDevice(device *PhoneDevice) {
 	close(device.send)
 }
 
-// resample24to16 resamples 24kHz PCM to 16kHz (simple decimation)
-func resample24to16(input []byte) []byte {
-	// 24kHz to 16kHz = 2:3 ratio
-	// Simple approach: take 2 samples for every 3
-	samples := len(input) / 2 // 16-bit samples
-	outSamples := samples * 2 / 3
-	output := make([]byte, outSamples*2)
-
-	for i := 0; i < outSamples; i++ {
-		srcIdx := (i * 3 / 2) * 2
-		if srcIdx+1 < len(input) {
-			output[i*2] = input[srcIdx]
-			output[i*2+1] = input[srcIdx+1]
-		}
-	}
-
-	return output
-}

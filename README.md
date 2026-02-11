@@ -16,7 +16,7 @@ Personal AI assistant powered by Claude, accessible via Telegram. Minerva can ma
 └──────────────┘     │  └────────────────────┐  │     └─────────────┘
                      │                          │
 ┌──────────────┐     │  ┌────────────────────┐  │     ┌─────────────┐
-│ Twilio/Phone │◄───►│  │     SQLite DB      │  │◄───►│ Gemini Live │
+│ Telnyx/Phone │◄───►│  │     SQLite DB      │  │◄───►│ Gemini Live │
 │  (voice)     │     │  └────────────────────┘  │     │ (voice AI)  │
 └──────────────┘     └──────────────────────────┘     └─────────────┘
 ```
@@ -25,7 +25,7 @@ Minerva is a single Go binary that acts as a personal AI hub:
 
 - **Brain** (Claude CLI) handles conversation, reminders, memory, and decision-making
 - **Agents** are remote Claude Code instances that handle all code-related tasks
-- **Voice** uses Gemini Live for real-time phone conversations via Twilio or Android bridge
+- **Voice** uses Gemini Live for real-time phone conversations via Telnyx or Android bridge
 - **Storage** is a single SQLite database with no external dependencies
 
 ## Features
@@ -48,7 +48,7 @@ Minerva is a single Go binary that acts as a personal AI hub:
 - **Smart Rescheduling** — AI autonomously decides whether to reschedule recurring/follow-up reminders
 - **Status Lifecycle** — `pending` → `fired` → `done`; only the user can dismiss
 
-### Voice Calls (Twilio + Gemini Live)
+### Voice Calls (Telnyx + Gemini Live)
 - **Outbound Calls** — AI makes phone calls on your behalf (reservations, inquiries, etc.)
 - **Inbound Calls** — AI answers your phone and takes messages
 - **Real-time Voice AI** — Gemini Live (`gemini-2.5-flash-native-audio`) for natural conversation
@@ -74,7 +74,7 @@ The AI brain has access to these tools, callable during conversations:
 - `create_reminder` / `list_reminders` / `delete_reminder` / `reschedule_reminder`
 - `update_memory` — Persistent user memory management
 - `send_email` — Send emails via Resend
-- `make_call` — Initiate phone calls via Twilio
+- `make_call` — Initiate phone calls via Telnyx
 - `run_claude` / `list_claude_projects` — Delegate tasks to remote agents
 - `create_task` / `get_task_progress` — Background task management
 - `run_code` — Execute JavaScript in a sandboxed environment (Goja)
@@ -90,7 +90,7 @@ Full CLI for direct interaction and scripting — reminders, memory, agents, ema
 
 Optional (for additional features):
 - [Resend](https://resend.com) account — for email
-- [Twilio](https://www.twilio.com) account — for phone calls
+- [Telnyx](https://telnyx.com) account — for phone calls
 - [Google AI API key](https://aistudio.google.com/apikey) — for Gemini Live voice
 
 ## Quick Start
@@ -146,9 +146,10 @@ All configuration is via environment variables (or `.env` file). See [`.env.exam
 |----------|-------------|
 | `RESEND_API_KEY` | Enable email sending via Resend |
 | `FROM_EMAIL` | Sender address (e.g., `Minerva <minerva@yourdomain.com>`) |
-| `TWILIO_ACCOUNT_SID` | Enable Twilio voice calls |
-| `TWILIO_AUTH_TOKEN` | Twilio auth token |
-| `TWILIO_PHONE_NUMBER` | Twilio phone number |
+| `TELNYX_API_KEY` | Enable Telnyx voice calls |
+| `TELNYX_APP_ID` | Telnyx TeXML app ID |
+| `TELNYX_PHONE_NUMBER` | Telnyx phone number |
+| `TELNYX_PUBLIC_KEY` | Telnyx webhook signing public key (base64) |
 | `GOOGLE_API_KEY` | Enable Gemini Live real-time voice AI |
 | `AGENT_PASSWORD` | Password for agent WebSocket auth |
 
@@ -173,7 +174,7 @@ minerva send "Hello from CLI"
 minerva agent list
 minerva agent run mac "git status" --dir /path/to/project
 
-# Voice calls (requires Twilio + Gemini)
+# Voice calls (requires Telnyx + Gemini)
 minerva call +14155551234 "Make a dinner reservation for 2 at 8pm"
 
 # Email (requires Resend)
@@ -283,12 +284,11 @@ minerva/
 ├── tools.go         # Tool executor (reminders, memory, email, etc.)
 ├── agents.go        # Agent hub (WebSocket server)
 ├── webhook.go       # HTTP server (webhooks, API endpoints)
-├── voice.go         # Gemini Live voice (Twilio Media Streams)
-├── twilio.go        # Twilio ConversationRelay
+├── voice.go         # Gemini Live voice (Telnyx media streaming)
 ├── phone.go         # Android phone bridge
 ├── task_runner.go   # Background task management
 ├── relay_client.go  # Encrypted relay client
-├── audio.go         # Audio format conversion (mu-law, PCM, resampling)
+├── audio.go         # Audio format conversion (PCM resampling)
 ├── workspace/
 │   └── CLAUDE.md    # System prompt for the AI brain
 ├── agent/
@@ -319,7 +319,7 @@ minerva/
 
 Agent tasks are **asynchronous** — Minerva dispatches work to agents and continues chatting. When an agent completes a task, the result is fed back through Minerva's AI brain for summarization.
 
-Voice calls use **Gemini Live** for real-time audio — Twilio handles telephony while Gemini provides natural conversation. Call summaries are automatically generated and sent via Telegram.
+Voice calls use **Gemini Live** for real-time audio — Telnyx handles telephony while Gemini provides natural conversation. Call summaries are automatically generated and sent via Telegram.
 
 ## Contributing
 

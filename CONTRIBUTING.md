@@ -32,8 +32,7 @@ Minerva is a Go monolith — all server code lives in the root package:
 - `ai.go` — Claude CLI integration
 - `db.go` — SQLite schema and queries
 - `tools.go` — Tool definitions and executor
-- `voice.go` — Gemini Live voice integration
-- `twilio.go` — Twilio ConversationRelay
+- `voice.go` — Gemini Live voice integration (Telnyx)
 - `phone.go` — Android phone bridge
 - `agents.go` — Remote agent WebSocket hub
 - `webhook.go` — HTTP endpoints

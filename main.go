@@ -156,7 +156,7 @@ Usage:
   minerva agent list                   List connected agents and their projects
   minerva agent run <name> "prompt" [--dir /path]  Run a task on an agent
   minerva email send <to> --subject "subject" --body "body" [--from "sender"]  Send email via Resend
-  minerva call <number> "purpose"      Make a phone call (via Twilio)
+  minerva call <number> "purpose"      Make a phone call (via Telnyx)
   minerva phone list                   List connected Android phones
   minerva phone call <number> "purpose"  Make a call via Android phone
   minerva file send <path> ["caption"]  Send a file to admin via Telegram

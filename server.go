@@ -7,24 +7,22 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
-	"time"
 
 	"minerva/tools"
 )
 
 // ServerState holds the running server components
 type ServerState struct {
-	bot            *Bot
-	db             *DB
-	taskRunner     *TaskRunner
-	twilioManager  *TwilioCallManager
-	voiceManager   *VoiceManager
-	phoneBridge    *PhoneBridge
-	webhook        *WebhookServer
-	relayClient    *RelayClient
-	scheduler      *Scheduler
-	mu             sync.Mutex
-	running        bool
+	bot          *Bot
+	db           *DB
+	taskRunner   *TaskRunner
+	voiceManager *VoiceManager
+	phoneBridge  *PhoneBridge
+	webhook      *WebhookServer
+	relayClient  *RelayClient
+	scheduler    *Scheduler
+	mu           sync.Mutex
+	running      bool
 }
 
 var serverState *ServerState
@@ -119,40 +117,14 @@ func StartServer(config *Config) error {
 	state.scheduler = NewScheduler(db, bot, bot.agentHub)
 	state.scheduler.Start()
 
-	// Initialize Twilio
-	if config.TwilioAccountSID != "" && config.TwilioAuthToken != "" {
-		state.twilioManager = NewTwilioCallManager(bot, config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber, config.BaseURL)
-		bot.twilioManager = state.twilioManager
-		log.Println("Twilio configured")
-
-		// Start balance checker (alerts when below $5)
-		go func() {
-			ticker := time.NewTicker(1 * time.Hour)
-			defer ticker.Stop()
-			var alerted bool
-			for range ticker.C {
-				balance, err := state.twilioManager.GetBalance()
-				if err != nil {
-					log.Printf("Failed to check Twilio balance: %v", err)
-					continue
-				}
-				if balance < 5.0 && !alerted {
-					bot.sendMessage(config.AdminID, fmt.Sprintf("⚠️ *Twilio balance bajo*\nSaldo actual: $%.2f", balance))
-					alerted = true
-				} else if balance >= 5.0 {
-					alerted = false
-				}
-			}
-		}()
-	}
-
-	// Initialize Voice AI (Gemini Live)
-	if config.GoogleAPIKey != "" {
-		state.voiceManager = NewVoiceManager(bot, config.GoogleAPIKey, config.BaseURL,
-			config.TwilioAccountSID, config.TwilioAuthToken, config.TwilioPhoneNumber,
-			config.OwnerName, config.DefaultCountryCode,
+	// Initialize Voice AI (Telnyx + Gemini Live)
+	if config.GoogleAPIKey != "" && config.TelnyxAPIKey != "" {
+		state.voiceManager = NewVoiceManager(bot, config.GoogleAPIKey,
+			config.TelnyxAPIKey, config.TelnyxAppID, config.TelnyxPhone,
+			config.BaseURL, config.OwnerName, config.DefaultCountryCode,
 			config.GeminiModel, config.GeminiVoice, config.VoiceLanguage)
-		log.Println("Voice AI (Gemini Live) configured")
+		bot.voiceManager = state.voiceManager
+		log.Println("Voice AI (Telnyx + Gemini Live) configured")
 	}
 
 	// Initialize Phone Bridge (Android)
@@ -164,7 +136,7 @@ func StartServer(config *Config) error {
 	// Start webhook server
 	if config.WebhookPort > 0 {
 		state.webhook = NewWebhookServer(bot, config.WebhookPort, config.ResendWebhookSecret,
-			state.twilioManager, bot.agentHub, state.voiceManager, state.phoneBridge, config)
+			bot.agentHub, state.voiceManager, state.phoneBridge, config)
 		go func() {
 			if err := state.webhook.Start(); err != nil {
 				log.Printf("Webhook server error: %v", err)

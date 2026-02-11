@@ -1,13 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +18,8 @@ import (
 const (
 	geminiWSURL      = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 	voiceCallTimeout = 5 * time.Minute
+	// Telnyx API
+	telnyxAPIBase = "https://api.telnyx.com/v2"
 )
 
 func buildIncomingVoicePrompt(ownerName, voiceLanguage string) string {
@@ -40,35 +42,36 @@ KEY BEHAVIORS:
 - If unsure about something, say you'll check with %s and get back to them`, ownerName, ownerName, ownerName, langInstruction, ownerName)
 }
 
-// VoiceManager handles voice calls via Twilio Media Streams + Gemini Live API
+// VoiceManager handles voice calls via Telnyx Call Control + Gemini Live API
 type VoiceManager struct {
 	bot                *Bot
-	apiKey             string
+	apiKey             string // Google API key for Gemini
+	telnyxAPIKey       string
+	telnyxAppID        string // Telnyx Call Control App connection_id
+	telnyxPhone        string // Telnyx phone number (E.164)
 	baseURL            string // Public URL for webhooks
-	twilioSID          string
-	twilioToken        string
-	twilioPhone        string
 	ownerName          string
 	defaultCountryCode string
 	geminiModel        string
 	geminiVoice        string
 	voiceLanguage      string
-	activeCalls        sync.Map
-	pendingCalls       sync.Map // callSID → system prompt override for outbound calls
+	activeCalls        sync.Map // callControlID → *voiceSession
+	pendingCalls       sync.Map // callControlID → system prompt override for outbound calls
 }
 
 // voiceSession tracks an active voice call
 type voiceSession struct {
-	callSID      string
-	streamSID    string
-	from         string
-	outbound     bool   // true for outbound calls
-	systemPrompt string // custom system prompt for outbound calls
-	startTime    time.Time
-	geminiConn   *websocket.Conn
-	twilioConn   *websocket.Conn
-	mu           sync.Mutex
-	closed       bool
+	callControlID string
+	streamID      string
+	from          string
+	outbound      bool   // true for outbound calls
+	systemPrompt  string // custom system prompt for outbound calls
+	startTime     time.Time
+	geminiConn    *websocket.Conn
+	telnyxConn    *websocket.Conn
+	mu            sync.Mutex
+	closed        bool
+	done          chan struct{} // signals session completion for timeout goroutine
 	// Transcription collected during the call
 	transcript []transcriptEntry
 }
@@ -78,22 +81,18 @@ type transcriptEntry struct {
 	Text    string
 }
 
-// Twilio Media Streams message types
-type twilioStreamMsg struct {
+// Telnyx WebSocket media stream message types
+type telnyxStreamMsg struct {
 	Event          string `json:"event"`
-	SequenceNumber string `json:"sequenceNumber,omitempty"`
-	StreamSID      string `json:"streamSid,omitempty"`
+	SequenceNumber string `json:"sequence_number,omitempty"`
+	StreamID       string `json:"stream_id,omitempty"`
 	Start          *struct {
-		StreamSID        string            `json:"streamSid"`
-		AccountSID       string            `json:"accountSid"`
-		CallSID          string            `json:"callSid"`
-		Tracks           []string          `json:"tracks"`
-		CustomParameters map[string]string `json:"customParameters"`
-		MediaFormat      struct {
+		CallControlID string `json:"call_control_id"`
+		MediaFormat   struct {
 			Encoding   string `json:"encoding"`
-			SampleRate int    `json:"sampleRate"`
+			SampleRate int    `json:"sample_rate"`
 			Channels   int    `json:"channels"`
-		} `json:"mediaFormat"`
+		} `json:"media_format"`
 	} `json:"start,omitempty"`
 	Media *struct {
 		Track     string `json:"track"`
@@ -101,18 +100,35 @@ type twilioStreamMsg struct {
 		Timestamp string `json:"timestamp"`
 		Payload   string `json:"payload"`
 	} `json:"media,omitempty"`
-	Stop *struct {
-		AccountSID string `json:"accountSid"`
-		CallSID    string `json:"callSid"`
-	} `json:"stop,omitempty"`
+}
+
+// Telnyx Call Control webhook event envelope
+type telnyxWebhookEvent struct {
+	Data struct {
+		ID        string `json:"id"`
+		EventType string `json:"event_type"`
+		Payload   struct {
+			CallControlID string `json:"call_control_id"`
+			CallLegID     string `json:"call_leg_id"`
+			CallSessionID string `json:"call_session_id"`
+			ConnectionID  string `json:"connection_id"`
+			From          string `json:"from"`
+			To            string `json:"to"`
+			Direction     string `json:"direction"`
+			State         string `json:"state"`
+			ClientState   string `json:"client_state,omitempty"`
+			HangupCause   string `json:"hangup_cause,omitempty"`
+			HangupSource  string `json:"hangup_source,omitempty"`
+		} `json:"payload"`
+	} `json:"data"`
 }
 
 // Gemini Live API message types
 type geminiSetupMsg struct {
 	Setup struct {
-		Model            string            `json:"model"`
-		GenerationConfig geminiGenConfig   `json:"generationConfig"`
-		SystemInstruction geminiContent    `json:"systemInstruction"`
+		Model              string          `json:"model"`
+		GenerationConfig   geminiGenConfig `json:"generationConfig"`
+		SystemInstruction  geminiContent   `json:"systemInstruction"`
 		InputAudioTranscription  *struct{} `json:"inputAudioTranscription,omitempty"`
 		OutputAudioTranscription *struct{} `json:"outputAudioTranscription,omitempty"`
 	} `json:"setup"`
@@ -136,8 +152,8 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text       string          `json:"text,omitempty"`
-	InlineData *geminiBlob     `json:"inlineData,omitempty"`
+	Text       string      `json:"text,omitempty"`
+	InlineData *geminiBlob `json:"inlineData,omitempty"`
 }
 
 type geminiBlob struct {
@@ -168,14 +184,14 @@ type geminiServerMsg struct {
 	} `json:"serverContent,omitempty"`
 }
 
-func NewVoiceManager(bot *Bot, apiKey, baseURL, twilioSID, twilioToken, twilioPhone, ownerName, defaultCountryCode, geminiModel, geminiVoice, voiceLanguage string) *VoiceManager {
+func NewVoiceManager(bot *Bot, googleAPIKey, telnyxAPIKey, telnyxAppID, telnyxPhone, baseURL, ownerName, defaultCountryCode, geminiModel, geminiVoice, voiceLanguage string) *VoiceManager {
 	return &VoiceManager{
 		bot:                bot,
-		apiKey:             apiKey,
+		apiKey:             googleAPIKey,
+		telnyxAPIKey:       telnyxAPIKey,
+		telnyxAppID:        telnyxAppID,
+		telnyxPhone:        telnyxPhone,
 		baseURL:            baseURL,
-		twilioSID:          twilioSID,
-		twilioToken:        twilioToken,
-		twilioPhone:        twilioPhone,
 		ownerName:          ownerName,
 		defaultCountryCode: defaultCountryCode,
 		geminiModel:        geminiModel,
@@ -184,17 +200,66 @@ func NewVoiceManager(bot *Bot, apiKey, baseURL, twilioSID, twilioToken, twilioPh
 	}
 }
 
-// HandleIncoming handles POST /voice/incoming - returns TwiML for Twilio Media Streams
-func (v *VoiceManager) HandleIncoming(w http.ResponseWriter, r *http.Request) {
+// HandleWebhook handles POST /voice/webhook - Telnyx Call Control events
+func (v *VoiceManager) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	from := r.FormValue("From")
-	callSID := r.FormValue("CallSid")
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading body", http.StatusBadRequest)
+		return
+	}
 
-	log.Printf("[Voice] Incoming call from %s (SID: %s)", from, callSID)
+	var event telnyxWebhookEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		log.Printf("[Voice] Failed to parse Telnyx webhook: %v", err)
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[Voice] Telnyx event: %s (call_control_id=%s)",
+		event.Data.EventType, event.Data.Payload.CallControlID)
+
+	switch event.Data.EventType {
+	case "call.initiated":
+		if event.Data.Payload.Direction == "incoming" {
+			v.handleIncomingCall(event)
+		}
+		// For outbound calls, we just wait for call.answered
+
+	case "call.answered":
+		// Outbound call was answered — streaming was configured at dial time
+		log.Printf("[Voice] Call answered: %s", event.Data.Payload.CallControlID)
+
+	case "streaming.started":
+		log.Printf("[Voice] Streaming started for call: %s", event.Data.Payload.CallControlID)
+
+	case "streaming.failed":
+		log.Printf("[Voice] Streaming failed for call: %s", event.Data.Payload.CallControlID)
+		v.bot.sendMessage(v.bot.config.AdminID, "❌ Error: streaming de audio falló en la llamada")
+
+	case "call.hangup":
+		log.Printf("[Voice] Call hangup: cause=%s source=%s",
+			event.Data.Payload.HangupCause, event.Data.Payload.HangupSource)
+		if val, ok := v.activeCalls.Load(event.Data.Payload.CallControlID); ok {
+			session := val.(*voiceSession)
+			v.closeSession(session)
+		}
+	}
+
+	// Always respond 200 to Telnyx
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleIncomingCall answers an incoming call and sets up media streaming
+func (v *VoiceManager) handleIncomingCall(event telnyxWebhookEvent) {
+	callControlID := event.Data.Payload.CallControlID
+	from := event.Data.Payload.From
+
+	log.Printf("[Voice] Incoming call from %s (ID: %s)", from, callControlID)
 
 	// Notify admin
 	v.bot.sendMessage(v.bot.config.AdminID, fmt.Sprintf("📞 *Llamada entrante*\nDe: %s\nMinerva (Gemini Live) contestando...", from))
@@ -204,21 +269,26 @@ func (v *VoiceManager) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
 	wsURL += "/voice/ws"
 
-	twiml := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Connect>
-        <Stream url="%s">
-            <Parameter name="from" value="%s" />
-            <Parameter name="call_sid" value="%s" />
-        </Stream>
-    </Connect>
-</Response>`, wsURL, url.QueryEscape(from), callSID)
+	// Answer the call with streaming configuration
+	// Use L16 at 16kHz — matches Gemini's input format, no transcoding needed
+	answerReq := map[string]any{
+		"stream_url":                          wsURL,
+		"stream_track":                        "inbound_track",
+		"stream_bidirectional_mode":           "rtp",
+		"stream_bidirectional_codec":          "L16",
+		"stream_bidirectional_sampling_rate":  16000,
+		"stream_bidirectional_target_legs":    "opposite",
+		"send_silence_when_idle":              true,
+		"client_state":                        base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"from":"%s","direction":"incoming"}`, from))),
+	}
 
-	w.Header().Set("Content-Type", "application/xml")
-	w.Write([]byte(twiml))
+	if err := v.telnyxCallAction(callControlID, "answer", answerReq); err != nil {
+		log.Printf("[Voice] Failed to answer call: %v", err)
+		v.bot.sendMessage(v.bot.config.AdminID, "❌ Error contestando llamada")
+	}
 }
 
-// HandleMediaStream handles WebSocket /voice/ws - bridges Twilio audio ↔ Gemini Live
+// HandleMediaStream handles WebSocket /voice/ws - bridges Telnyx audio ↔ Gemini Live
 func (v *VoiceManager) HandleMediaStream(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -227,52 +297,74 @@ func (v *VoiceManager) HandleMediaStream(w http.ResponseWriter, r *http.Request)
 	}
 	defer conn.Close()
 
-	log.Printf("[Voice] Twilio media stream connected")
+	// Set read deadline for the initial handshake
+	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		return nil
+	})
+
+	log.Printf("[Voice] Telnyx media stream connected")
 
 	session := &voiceSession{
-		twilioConn: conn,
+		telnyxConn: conn,
 		startTime:  time.Now(),
+		done:       make(chan struct{}),
 	}
 
 	for {
+		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("[Voice] Twilio WS read error: %v", err)
+			if !session.closed {
+				log.Printf("[Voice] Telnyx WS read error: %v", err)
+			}
 			break
 		}
 
-		var msg twilioStreamMsg
+		var msg telnyxStreamMsg
 		if err := json.Unmarshal(message, &msg); err != nil {
-			log.Printf("[Voice] Failed to parse Twilio message: %v", err)
+			log.Printf("[Voice] Failed to parse Telnyx message: %v", err)
 			continue
 		}
 
 		switch msg.Event {
 		case "connected":
-			log.Printf("[Voice] Twilio stream protocol connected")
+			log.Printf("[Voice] Telnyx stream protocol connected")
 
 		case "start":
 			if msg.Start == nil {
 				continue
 			}
-			session.streamSID = msg.Start.StreamSID
-			session.callSID = msg.Start.CallSID
-			if from, ok := msg.Start.CustomParameters["from"]; ok {
-				session.from = from
-			}
+			session.streamID = msg.StreamID
+			session.callControlID = msg.Start.CallControlID
 
-			// Check if this is an outbound call with a custom system prompt
-			if dir, ok := msg.Start.CustomParameters["direction"]; ok && dir == "outbound" {
-				session.outbound = true
-				if prompt, ok := v.pendingCalls.LoadAndDelete(session.callSID); ok {
+			// Decode client_state to get call metadata
+			if val, ok := v.activeCalls.Load(session.callControlID); ok {
+				// Session already exists from outbound call setup
+				existing := val.(*voiceSession)
+				existing.mu.Lock()
+				existing.telnyxConn = conn
+				existing.streamID = msg.StreamID
+				existing.startTime = time.Now()
+				existing.done = session.done
+				existing.mu.Unlock()
+				session = existing
+			} else {
+				// New incoming call session
+				session.from = "unknown"
+				// Try to extract from pending calls
+				if prompt, ok := v.pendingCalls.LoadAndDelete(session.callControlID); ok {
+					session.outbound = true
 					session.systemPrompt = prompt.(string)
 				}
 			}
 
-			log.Printf("[Voice] Stream started: streamSID=%s callSID=%s from=%s outbound=%v",
-				session.streamSID, session.callSID, session.from, session.outbound)
+			log.Printf("[Voice] Stream started: streamID=%s callControlID=%s encoding=%s rate=%d",
+				session.streamID, session.callControlID,
+				msg.Start.MediaFormat.Encoding, msg.Start.MediaFormat.SampleRate)
 
-			v.activeCalls.Store(session.callSID, session)
+			v.activeCalls.Store(session.callControlID, session)
 
 			// Connect to Gemini Live API
 			if err := v.connectGemini(session); err != nil {
@@ -281,34 +373,44 @@ func (v *VoiceManager) HandleMediaStream(w http.ResponseWriter, r *http.Request)
 				return
 			}
 
-			// Start reading from Gemini and forwarding to Twilio
-			go v.geminiToTwilio(session)
+			// Start reading from Gemini and forwarding to Telnyx
+			go v.geminiToTelnyx(session)
 
-			// Start call timeout (5 minutes max)
+			// Start call timeout (5 minutes max) — exits when session ends or timeout fires
 			go func() {
 				timer := time.NewTimer(voiceCallTimeout)
 				defer timer.Stop()
-				<-timer.C
-				session.mu.Lock()
-				closed := session.closed
-				session.mu.Unlock()
-				if !closed {
-					log.Printf("[Voice] Call timeout reached (%s), closing session", voiceCallTimeout)
-					v.closeSession(session)
-					// Close Twilio WebSocket to end the call
-					conn.Close()
+				select {
+				case <-timer.C:
+					session.mu.Lock()
+					closed := session.closed
+					session.mu.Unlock()
+					if !closed {
+						log.Printf("[Voice] Call timeout reached (%s), hanging up", voiceCallTimeout)
+						v.hangUp(session.callControlID)
+						v.closeSession(session)
+					}
+				case <-session.done:
+					// Session ended before timeout — goroutine exits cleanly
 				}
 			}()
 
 		case "media":
-			if msg.Media == nil || session.geminiConn == nil {
+			if msg.Media == nil {
 				continue
 			}
-			// Forward audio to Gemini: mu-law 8kHz → PCM 16kHz
+			session.mu.Lock()
+			geminiConn := session.geminiConn
+			closed := session.closed
+			session.mu.Unlock()
+			if closed || geminiConn == nil {
+				continue
+			}
+			// Telnyx sends L16 16kHz PCM — forward directly to Gemini (also expects PCM 16kHz)
 			v.forwardToGemini(session, msg.Media.Payload)
 
 		case "stop":
-			log.Printf("[Voice] Stream stopped: callSID=%s", session.callSID)
+			log.Printf("[Voice] Stream stopped: callControlID=%s", session.callControlID)
 			v.closeSession(session)
 			return
 		}
@@ -326,7 +428,9 @@ func (v *VoiceManager) connectGemini(session *voiceSession) error {
 		return fmt.Errorf("gemini dial: %w", err)
 	}
 
+	session.mu.Lock()
 	session.geminiConn = conn
+	session.mu.Unlock()
 
 	// Build setup message
 	prompt := buildIncomingVoicePrompt(v.ownerName, v.voiceLanguage)
@@ -371,33 +475,15 @@ func (v *VoiceManager) connectGemini(session *voiceSession) error {
 	return nil
 }
 
-// forwardToGemini converts Twilio mu-law 8kHz audio to PCM 16kHz and sends to Gemini
+// forwardToGemini sends Telnyx L16 16kHz audio directly to Gemini (no transcoding needed)
 func (v *VoiceManager) forwardToGemini(session *voiceSession, payload string) {
-	// Decode base64 mu-law
-	mulawData, err := base64.StdEncoding.DecodeString(payload)
-	if err != nil {
-		log.Printf("[Voice] Failed to decode Twilio audio: %v", err)
-		return
-	}
-
-	// mu-law → PCM 16-bit
-	pcmSamples := mulawDecodeChunk(mulawData)
-
-	// Resample 8kHz → 16kHz
-	pcm16k := resampleLinear(pcmSamples, 8000, 16000)
-
-	// PCM samples → bytes (little-endian)
-	pcmBytes := pcmToBytes(pcm16k)
-
-	// Encode as base64 for Gemini
-	pcmB64 := base64.StdEncoding.EncodeToString(pcmBytes)
-
-	// Send to Gemini
+	// Telnyx sends L16 (PCM 16-bit signed LE) at 16kHz — Gemini expects the same format
+	// No transcoding needed, just forward the base64 payload
 	input := geminiRealtimeInput{}
 	input.RealtimeInput.MediaChunks = []geminiBlob{
 		{
 			MimeType: "audio/pcm;rate=16000",
-			Data:     pcmB64,
+			Data:     payload,
 		},
 	}
 
@@ -412,28 +498,28 @@ func (v *VoiceManager) forwardToGemini(session *voiceSession, payload string) {
 	}
 }
 
-// geminiToTwilio reads audio from Gemini and forwards to Twilio
-func (v *VoiceManager) geminiToTwilio(session *voiceSession) {
+// geminiToTelnyx reads audio from Gemini and forwards to Telnyx
+func (v *VoiceManager) geminiToTelnyx(session *voiceSession) {
 	defer func() {
 		log.Printf("[Voice] Gemini reader goroutine exiting")
 	}()
 
 	for {
 		session.mu.Lock()
-		if session.closed {
-			session.mu.Unlock()
-			return
-		}
+		closed := session.closed
 		geminiConn := session.geminiConn
 		session.mu.Unlock()
 
-		if geminiConn == nil {
+		if closed || geminiConn == nil {
 			return
 		}
 
 		_, msg, err := geminiConn.ReadMessage()
 		if err != nil {
-			if !session.closed {
+			session.mu.Lock()
+			isClosed := session.closed
+			session.mu.Unlock()
+			if !isClosed {
 				log.Printf("[Voice] Gemini WS read error: %v", err)
 			}
 			return
@@ -470,7 +556,7 @@ func (v *VoiceManager) geminiToTwilio(session *voiceSession) {
 		if resp.ServerContent.ModelTurn != nil {
 			for _, part := range resp.ServerContent.ModelTurn.Parts {
 				if part.InlineData != nil && strings.HasPrefix(part.InlineData.MimeType, "audio/pcm") {
-					v.forwardToTwilio(session, part.InlineData.Data)
+					v.forwardToTelnyx(session, part.InlineData.Data)
 				}
 			}
 		}
@@ -481,9 +567,9 @@ func (v *VoiceManager) geminiToTwilio(session *voiceSession) {
 	}
 }
 
-// forwardToTwilio converts Gemini PCM 24kHz audio to mu-law 8kHz and sends to Twilio
-func (v *VoiceManager) forwardToTwilio(session *voiceSession, pcmB64 string) {
-	// Decode base64 PCM
+// forwardToTelnyx converts Gemini PCM 24kHz audio to L16 16kHz and sends to Telnyx
+func (v *VoiceManager) forwardToTelnyx(session *voiceSession, pcmB64 string) {
+	// Decode base64 PCM from Gemini (24kHz 16-bit LE)
 	pcmBytes, err := base64.StdEncoding.DecodeString(pcmB64)
 	if err != nil {
 		log.Printf("[Voice] Failed to decode Gemini audio: %v", err)
@@ -493,40 +579,41 @@ func (v *VoiceManager) forwardToTwilio(session *voiceSession, pcmB64 string) {
 	// Bytes → PCM 16-bit samples
 	pcmSamples := bytesToPCM(pcmBytes)
 
-	// Resample 24kHz → 8kHz
-	pcm8k := resampleLinear(pcmSamples, 24000, 8000)
+	// Resample 24kHz → 16kHz (Telnyx expects L16 16kHz)
+	pcm16k := resampleLinear(pcmSamples, 24000, 16000)
 
-	// PCM → mu-law
-	mulawData := mulawEncodeChunk(pcm8k)
+	// PCM samples → bytes (little-endian)
+	outBytes := pcmToBytes(pcm16k)
 
-	// Encode as base64 for Twilio
-	mulawB64 := base64.StdEncoding.EncodeToString(mulawData)
+	// Encode as base64 for Telnyx
+	outB64 := base64.StdEncoding.EncodeToString(outBytes)
 
-	// Send to Twilio
-	twilioMsg := map[string]any{
-		"event":     "media",
-		"streamSid": session.streamSID,
+	// Send to Telnyx as bidirectional media
+	telnyxMsg := map[string]any{
+		"event": "media",
 		"media": map[string]string{
-			"payload": mulawB64,
+			"payload": outB64,
 		},
 	}
 
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.closed || session.twilioConn == nil {
+	if session.closed || session.telnyxConn == nil {
 		return
 	}
 
-	if err := session.twilioConn.WriteJSON(twilioMsg); err != nil {
-		log.Printf("[Voice] Failed to send audio to Twilio: %v", err)
+	if err := session.telnyxConn.WriteJSON(telnyxMsg); err != nil {
+		log.Printf("[Voice] Failed to send audio to Telnyx: %v", err)
 	}
 }
 
-// MakeCall initiates an outbound call via Twilio with Gemini Live voice
-// purpose contains the full instructions for what Minerva should accomplish in the call
+// MakeCall initiates an outbound call via Telnyx with Gemini Live voice
 func (v *VoiceManager) MakeCall(to, purpose string) (string, error) {
-	if v.twilioPhone == "" {
-		return "", fmt.Errorf("no Twilio phone number configured")
+	if v.telnyxPhone == "" {
+		return "", fmt.Errorf("no Telnyx phone number configured")
+	}
+	if v.telnyxAppID == "" {
+		return "", fmt.Errorf("no Telnyx app ID configured")
 	}
 
 	// Normalize phone number
@@ -534,22 +621,12 @@ func (v *VoiceManager) MakeCall(to, purpose string) (string, error) {
 		to = v.defaultCountryCode + strings.TrimPrefix(to, "0")
 	}
 
-	// Build TwiML that points to our outbound endpoint
+	// Build WebSocket URL for media stream
 	wsURL := strings.Replace(v.baseURL, "https://", "wss://", 1)
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
 	wsURL += "/voice/ws"
 
-	twiml := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Connect>
-        <Stream url="%s">
-            <Parameter name="from" value="minerva-outbound" />
-            <Parameter name="direction" value="outbound" />
-        </Stream>
-    </Connect>
-</Response>`, wsURL)
-
-	// Build outbound system prompt with purpose
+	// Build outbound system prompt
 	outboundPrompt := fmt.Sprintf(`You are Minerva, a personal AI assistant for %s. You are making an outbound phone call on their behalf.
 
 YOUR TASK FOR THIS CALL:
@@ -565,20 +642,30 @@ Key behaviors:
 - If you accomplish the task or get the information needed, thank them and end the call politely
 - If you encounter issues, explain you'll let %s know and end the call`, v.ownerName, purpose, v.voiceLanguage, v.ownerName)
 
-	// Make the call via Twilio API
-	callURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Calls.json", v.twilioSID)
+	// Create outbound call via Telnyx API with streaming configuration
+	callReq := map[string]any{
+		"connection_id": v.telnyxAppID,
+		"to":            to,
+		"from":          v.telnyxPhone,
+		"webhook_url":   v.baseURL + "/voice/webhook",
+		"stream_url":    wsURL,
+		"stream_track":  "inbound_track",
+		"stream_bidirectional_mode":           "rtp",
+		"stream_bidirectional_codec":          "L16",
+		"stream_bidirectional_sampling_rate":  16000,
+		"stream_bidirectional_target_legs":    "opposite",
+		"send_silence_when_idle":              true,
+		"timeout_secs":                        60,
+		"time_limit_secs":                     int(voiceCallTimeout.Seconds()),
+	}
 
-	data := url.Values{}
-	data.Set("To", to)
-	data.Set("From", v.twilioPhone)
-	data.Set("Twiml", twiml)
-
-	req, err := http.NewRequest("POST", callURL, strings.NewReader(data.Encode()))
+	reqBody, _ := json.Marshal(callReq)
+	req, err := http.NewRequest("POST", telnyxAPIBase+"/calls", bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
-	req.SetBasicAuth(v.twilioSID, v.twilioToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+v.telnyxAPIKey)
 
 	resp, err := httpClientWithTimeout.Do(req)
 	if err != nil {
@@ -592,23 +679,77 @@ Key behaviors:
 	}
 
 	var result struct {
-		SID     string `json:"sid"`
-		Message string `json:"message"`
-		Code    int    `json:"code"`
+		Data struct {
+			CallControlID string `json:"call_control_id"`
+			CallSessionID string `json:"call_session_id"`
+			CallLegID     string `json:"call_leg_id"`
+			IsAlive       bool   `json:"is_alive"`
+		} `json:"data"`
+		Errors []struct {
+			Code   string `json:"code"`
+			Title  string `json:"title"`
+			Detail string `json:"detail"`
+		} `json:"errors"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", fmt.Errorf("failed to decode response: %w (body: %s)", err, string(body))
 	}
-	if resp.StatusCode >= 400 || result.Code != 0 {
-		return "", fmt.Errorf("Twilio error (code %d): %s", result.Code, result.Message)
+	if len(result.Errors) > 0 {
+		return "", fmt.Errorf("Telnyx error: %s - %s", result.Errors[0].Title, result.Errors[0].Detail)
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("Telnyx API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	log.Printf("[Voice] Outbound call initiated: SID=%s, To=%s", result.SID, to)
+	callControlID := result.Data.CallControlID
+	log.Printf("[Voice] Outbound call initiated: ID=%s, To=%s", callControlID, to)
 
-	// Store the outbound system prompt so HandleMediaStream can use it
-	v.pendingCalls.Store(result.SID, outboundPrompt)
+	// Pre-create session for the outbound call
+	session := &voiceSession{
+		callControlID: callControlID,
+		from:          to,
+		outbound:      true,
+		systemPrompt:  outboundPrompt,
+		startTime:     time.Now(),
+		done:          make(chan struct{}),
+	}
+	v.activeCalls.Store(callControlID, session)
+	v.pendingCalls.Store(callControlID, outboundPrompt)
 
-	return result.SID, nil
+	return callControlID, nil
+}
+
+// hangUp terminates a call via Telnyx API
+func (v *VoiceManager) hangUp(callControlID string) {
+	if err := v.telnyxCallAction(callControlID, "hangup", map[string]any{}); err != nil {
+		log.Printf("[Voice] Failed to hang up call %s: %v", callControlID, err)
+	}
+}
+
+// telnyxCallAction performs a call control action via the Telnyx API
+func (v *VoiceManager) telnyxCallAction(callControlID, action string, params map[string]any) error {
+	url := fmt.Sprintf("%s/calls/%s/actions/%s", telnyxAPIBase, callControlID, action)
+
+	reqBody, _ := json.Marshal(params)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+v.telnyxAPIKey)
+
+	resp, err := httpClientWithTimeout.Do(req)
+	if err != nil {
+		return fmt.Errorf("API request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Telnyx API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 // closeSession cleans up a voice session
@@ -620,14 +761,25 @@ func (v *VoiceManager) closeSession(session *voiceSession) {
 	}
 	session.closed = true
 	geminiConn := session.geminiConn
+	doneCh := session.done
 	session.mu.Unlock()
+
+	// Signal the timeout goroutine to exit
+	if doneCh != nil {
+		select {
+		case <-doneCh:
+			// Already closed
+		default:
+			close(doneCh)
+		}
+	}
 
 	if geminiConn != nil {
 		geminiConn.Close()
 	}
 
-	if session.callSID != "" {
-		v.activeCalls.Delete(session.callSID)
+	if session.callControlID != "" {
+		v.activeCalls.Delete(session.callControlID)
 	}
 
 	duration := time.Since(session.startTime).Round(time.Second)
@@ -695,8 +847,14 @@ func (v *VoiceManager) generateSummary(session *voiceSession, duration time.Dura
 		session.from, duration, summary))
 
 	// Pass the summary to the brain so it has context about the call
-	// This allows the brain to act on the call results (e.g., create reminders, follow up)
 	callContext := fmt.Sprintf("[LLAMADA TELEFÓNICA COMPLETADA]\nDe: %s\nDuración: %s\nResumen: %s\n\nSi hay acciones pendientes (callbacks, recordatorios, tareas), créalas ahora. Responde brevemente confirmando qué acciones has tomado (si alguna).",
 		session.from, duration, summary)
 	go v.bot.ProcessSystemEvent(v.bot.config.AdminID, callContext)
+}
+
+func truncateForTelegram(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

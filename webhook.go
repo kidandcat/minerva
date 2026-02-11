@@ -56,7 +56,6 @@ type WebhookServer struct {
 	bot            *Bot
 	port           int
 	secret         string
-	twilioManager  *TwilioCallManager
 	agentHub       *AgentHub
 	voiceManager   *VoiceManager
 	phoneBridge    *PhoneBridge
@@ -66,12 +65,11 @@ type WebhookServer struct {
 }
 
 // NewWebhookServer creates a new webhook server
-func NewWebhookServer(bot *Bot, port int, secret string, twilioManager *TwilioCallManager, agentHub *AgentHub, voiceManager *VoiceManager, phoneBridge *PhoneBridge, config *Config) *WebhookServer {
+func NewWebhookServer(bot *Bot, port int, secret string, agentHub *AgentHub, voiceManager *VoiceManager, phoneBridge *PhoneBridge, config *Config) *WebhookServer {
 	return &WebhookServer{
 		bot:            bot,
 		port:           port,
 		secret:         secret,
-		twilioManager:  twilioManager,
 		agentHub:       agentHub,
 		voiceManager:   voiceManager,
 		phoneBridge:    phoneBridge,
@@ -90,11 +88,11 @@ func (w *WebhookServer) Start() error {
 		return wsAuthMiddleware(w.config.AgentPassword, w.allowedOrigins, next)
 	}
 
-	// Twilio webhook signature validation middleware
-	twilioAuth := func(next http.HandlerFunc) http.HandlerFunc { return next } // default: no-op
-	if w.config.TwilioAuthToken != "" && w.config.BaseURL != "" {
-		twilioAuth = func(next http.HandlerFunc) http.HandlerFunc {
-			return twilioWebhookAuth(w.config.TwilioAuthToken, w.config.BaseURL, next)
+	// Telnyx webhook signature validation middleware
+	telnyxAuth := func(next http.HandlerFunc) http.HandlerFunc { return next } // default: no-op
+	if w.config.TelnyxPublicKey != "" {
+		telnyxAuth = func(next http.HandlerFunc) http.HandlerFunc {
+			return telnyxWebhookAuth(w.config.TelnyxPublicKey, next)
 		}
 	}
 
@@ -104,18 +102,12 @@ func (w *WebhookServer) Start() error {
 	// Email webhook (validated via Svix signature, not Bearer token)
 	http.HandleFunc("/webhook/email", chainMiddleware(w.handleEmailWebhook, rl, bigBody))
 
-	// Twilio ConversationRelay WebSocket and incoming calls (validated via Twilio signature)
-	if w.twilioManager != nil {
-		http.HandleFunc("/twilio/ws", chainMiddleware(w.twilioManager.HandleWebSocket, rl))
-		http.HandleFunc("/twilio/voice", chainMiddleware(w.twilioManager.HandleIncomingCall, rl, body, twilioAuth))
-	}
-
-	// Voice AI (Gemini Live) endpoints
+	// Voice AI (Telnyx + Gemini Live) endpoints
 	if w.voiceManager != nil {
-		http.HandleFunc("/voice/incoming", chainMiddleware(w.voiceManager.HandleIncoming, rl, body, twilioAuth))
+		http.HandleFunc("/voice/webhook", chainMiddleware(w.voiceManager.HandleWebhook, rl, body, telnyxAuth))
 		http.HandleFunc("/voice/ws", chainMiddleware(w.voiceManager.HandleMediaStream, rl))
 		http.HandleFunc("/voice/call", chainMiddleware(w.handleVoiceCall, rl, body, localhostOnly))
-		log.Println("Voice AI endpoints: /voice/incoming, /voice/ws, /voice/call")
+		log.Println("Voice AI endpoints: /voice/webhook, /voice/ws, /voice/call")
 	}
 
 	// Android Phone Bridge endpoint (auth required)
@@ -169,7 +161,7 @@ func (w *WebhookServer) handleVoiceCall(rw http.ResponseWriter, r *http.Request)
 		req.Purpose = "Llamar para hablar con la persona y averiguar qué necesita."
 	}
 
-	callSID, err := w.voiceManager.MakeCall(req.To, req.Purpose)
+	callID, err := w.voiceManager.MakeCall(req.To, req.Purpose)
 	if err != nil {
 		log.Printf("[Voice] Failed to make call: %v", err)
 		rw.Header().Set("Content-Type", "application/json")
@@ -182,9 +174,9 @@ func (w *WebhookServer) handleVoiceCall(rw http.ResponseWriter, r *http.Request)
 
 	rw.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(rw).Encode(map[string]any{
-		"status":   "calling",
-		"call_sid": callSID,
-		"to":       req.To,
+		"status":  "calling",
+		"call_id": callID,
+		"to":      req.To,
 	})
 }
 

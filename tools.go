@@ -53,7 +53,7 @@ func (t *ToolExecutor) Execute(name string, arguments string, bot *Bot) (string,
 
 // executeCall handles the make_call tool
 func executeCall(bot *Bot, userID int64, arguments string) (string, error) {
-	if bot.twilioManager == nil {
+	if bot.voiceManager == nil {
 		return "", fmt.Errorf("voice calls not configured")
 	}
 
@@ -72,22 +72,12 @@ func executeCall(bot *Bot, userID int64, arguments string) (string, error) {
 		return "", fmt.Errorf("purpose is required")
 	}
 
-	// Get conversation ID for the user
-	user, _, err := bot.db.GetOrCreateUser(userID, "", "")
-	if err != nil {
-		return "", fmt.Errorf("failed to get user: %w", err)
-	}
-	conv, err := bot.db.GetActiveConversation(user.ID)
-	if err != nil {
-		return "", fmt.Errorf("failed to get conversation: %w", err)
-	}
-
-	callSID, err := bot.twilioManager.InitiateCall(args.PhoneNumber, args.Purpose, userID, conv.ID)
+	callID, err := bot.voiceManager.MakeCall(args.PhoneNumber, args.Purpose)
 	if err != nil {
 		return "", fmt.Errorf("failed to initiate call: %w", err)
 	}
 
-	return fmt.Sprintf("Call initiated successfully. Call ID: %s. I will keep you updated on the call progress.", callSID), nil
+	return fmt.Sprintf("Call initiated successfully. Call ID: %s. I will keep you updated on the call progress.", callID), nil
 }
 
 // executeCreateTask handles the create_task tool

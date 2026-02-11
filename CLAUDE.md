@@ -42,6 +42,10 @@ See `.env.example` for the full list. Key variables:
 | `DATABASE_PATH` | No | SQLite path (default: `./minerva.db`) |
 | `WEBHOOK_PORT` | No | HTTP server port (default: 8080) |
 | `FROM_EMAIL` | No | Email sender address |
+| `TELNYX_API_KEY` | No | Telnyx API key (v2) |
+| `TELNYX_APP_ID` | No | Telnyx Call Control App connection_id |
+| `TELNYX_PHONE_NUMBER` | No | Telnyx phone number (E.164) |
+| `TELNYX_PUBLIC_KEY` | No | Telnyx webhook Ed25519 public key |
 | `AGENT_PASSWORD` | No | Password for agent WebSocket auth |
 
 ## CLI Commands
@@ -57,7 +61,7 @@ minerva memory set "content"                               # Set user memory
 minerva send "message"                                     # Send Telegram message to admin
 minerva context                                            # Get recent conversation context
 minerva email send <to> --subject "subj" --body "body"     # Send email via Resend
-minerva call <number> "purpose"                            # Make phone call (Twilio)
+minerva call <number> "purpose"                            # Make phone call (Telnyx)
 minerva phone list                                         # List connected Android phones
 minerva phone call <number> "purpose"                      # Call via Android phone bridge
 minerva agent list                                         # List connected agents
@@ -86,8 +90,8 @@ tools are exposed as CLI commands that Claude executes via its built-in Bash too
 | Path | Method | Description |
 |------|--------|-------------|
 | `/health` | GET | Health check |
-| `/voice/incoming` | POST | Twilio incoming call webhook |
-| `/voice/ws` | GET | Twilio Media Streams WebSocket |
+| `/voice/webhook` | POST | Telnyx Call Control webhook |
+| `/voice/ws` | GET | Telnyx media stream WebSocket |
 | `/voice/call` | POST | Initiate outbound call `{"to":"...", "purpose":"..."}` |
 | `/phone/ws` | GET | Android phone bridge WebSocket |
 | `/phone/list` | GET | List connected Android devices |
@@ -104,11 +108,13 @@ Status flow: `pending` -> `fired` -> `done`
 - Brain decides whether to reschedule (recurring tasks, follow-ups)
 - Only the user can dismiss reminders via `/reminders` or `delete_reminder` tool
 
-## Voice Calls (Gemini Live)
+## Voice Calls (Telnyx + Gemini Live)
 
-- Model: `models/gemini-2.5-flash-native-audio-latest`
+- Telephony: Telnyx Call Control API v2
+- AI Voice: Gemini Live (`models/gemini-2.5-flash-native-audio-latest`)
 - API: `v1beta` WebSocket (BidiGenerateContent)
-- Audio pipeline: Twilio mu-law 8kHz <-> Gemini PCM 16kHz input / 24kHz output
+- Audio pipeline: Telnyx L16 PCM 16kHz <-> Gemini PCM 16kHz input / 24kHz output
+- No mu-law transcoding needed — Telnyx streams raw PCM directly
 - 5-minute call timeout
 - Auto-generates call summary -> Telegram notification + system event
 
@@ -123,9 +129,9 @@ Status flow: `pending` -> `fired` -> `done`
 | `ai.go` | Claude CLI client (`claude -p`) |
 | `db.go` | SQLite database layer |
 | `tools.go` | Tool definitions + executor |
-| `voice.go` | Gemini Live voice (Twilio integration) |
+| `voice.go` | Telnyx + Gemini Live voice calls |
 | `phone.go` | Android phone bridge |
-| `twilio.go` | Twilio ConversationRelay |
+| `audio.go` | PCM resampling utilities |
 | `webhook.go` | HTTP webhook handlers |
 | `agents.go` | Agent hub (remote Claude Code) |
 | `schedule.go` | Scheduled task system (autonomous execution) |

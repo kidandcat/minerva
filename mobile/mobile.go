@@ -15,9 +15,9 @@ type MobileConfig struct {
 	DatabasePath     string `json:"database_path"`
 	Models           string `json:"models"` // comma-separated
 	ResendAPIKey     string `json:"resend_api_key,omitempty"`
-	TwilioAccountSID string `json:"twilio_account_sid,omitempty"`
-	TwilioAuthToken  string `json:"twilio_auth_token,omitempty"`
-	TwilioPhone      string `json:"twilio_phone,omitempty"`
+	TelnyxAPIKey     string `json:"telnyx_api_key,omitempty"`
+	TelnyxAppID      string `json:"telnyx_app_id,omitempty"`
+	TelnyxPhone      string `json:"telnyx_phone,omitempty"`
 	AgentPassword    string `json:"agent_password,omitempty"`
 	GoogleAPIKey     string `json:"google_api_key,omitempty"`
 	WebhookPort      int    `json:"webhook_port,omitempty"`

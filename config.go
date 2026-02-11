@@ -27,9 +27,10 @@ type Config struct {
 	ResendAPIKey         string // Resend API key for email
 	ResendWebhookSecret  string // Resend webhook signing secret
 	WebhookPort          int    // Port for incoming webhooks
-	TwilioAccountSID     string // Twilio Account SID
-	TwilioAuthToken      string // Twilio Auth Token
-	TwilioPhoneNumber    string // Twilio phone number for outbound calls
+	TelnyxAPIKey         string // Telnyx API key (v2)
+	TelnyxAppID          string // Telnyx Call Control App connection_id
+	TelnyxPhone          string // Telnyx phone number (E.164)
+	TelnyxPublicKey      string // Telnyx webhook public key for Ed25519 verification
 	AgentPassword        string // Password for agent authentication
 	GoogleAPIKey         string // Google API Key for Gemini Live voice
 	BaseURL              string // Public URL for webhooks (e.g., https://example.com)
@@ -70,9 +71,10 @@ func loadConfigCommon() *Config {
 		ResendAPIKey:       os.Getenv("RESEND_API_KEY"),
 		ResendWebhookSecret: os.Getenv("RESEND_WEBHOOK_SECRET"),
 		WebhookPort:        getEnvAsIntOrDefault("WEBHOOK_PORT", 8080),
-		TwilioAccountSID:   os.Getenv("TWILIO_ACCOUNT_SID"),
-		TwilioAuthToken:    os.Getenv("TWILIO_AUTH_TOKEN"),
-		TwilioPhoneNumber:  os.Getenv("TWILIO_PHONE_NUMBER"),
+		TelnyxAPIKey:       os.Getenv("TELNYX_API_KEY"),
+		TelnyxAppID:        os.Getenv("TELNYX_APP_ID"),
+		TelnyxPhone:        os.Getenv("TELNYX_PHONE_NUMBER"),
+		TelnyxPublicKey:    os.Getenv("TELNYX_PUBLIC_KEY"),
 		AgentPassword:      os.Getenv("AGENT_PASSWORD"),
 		GoogleAPIKey:       os.Getenv("GOOGLE_API_KEY"),
 		BaseURL:            os.Getenv("BASE_URL"),

@@ -1,21 +1,28 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha1"
+	"crypto/ed25519"
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"golang.org/x/time/rate"
 )
+
+// upgrader is the shared WebSocket upgrader for all endpoints
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
 
 // Security middleware and helpers
 
@@ -76,56 +83,44 @@ func wsAuthMiddleware(password string, allowedOrigins []string, next http.Handle
 	}
 }
 
-// twilioWebhookAuth validates Twilio request signatures using X-Twilio-Signature.
-// Only applies when Twilio auth token is configured.
-func twilioWebhookAuth(authToken, baseURL string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if authToken == "" {
-			// No auth token configured, skip validation (but this should never happen for Twilio endpoints)
-			next(w, r)
-			return
-		}
+// telnyxWebhookAuth validates Telnyx webhook signatures using Ed25519.
+// The public key is obtained from Telnyx Mission Control Portal.
+func telnyxWebhookAuth(publicKeyBase64 string, next http.HandlerFunc) http.HandlerFunc {
+	pubKey, err := base64.StdEncoding.DecodeString(publicKeyBase64)
+	if err != nil {
+		log.Printf("[Security] WARNING: invalid Telnyx public key, webhook auth disabled: %v", err)
+		return next
+	}
 
-		signature := r.Header.Get("X-Twilio-Signature")
-		if signature == "" {
-			log.Printf("[Security] Twilio webhook rejected: missing X-Twilio-Signature for %s", r.URL.Path)
+	return func(w http.ResponseWriter, r *http.Request) {
+		signature := r.Header.Get("telnyx-signature-ed25519")
+		timestamp := r.Header.Get("telnyx-timestamp")
+		if signature == "" || timestamp == "" {
+			log.Printf("[Security] Telnyx webhook rejected: missing signature headers for %s", r.URL.Path)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 
-		if err := r.ParseForm(); err != nil {
+		// Read the body for verification, then restore it
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
 
-		fullURL := baseURL + r.URL.Path
+		// Build signed payload: timestamp|body
+		signedPayload := timestamp + "|" + string(body)
 
-		// Build sorted params string
-		params := make(map[string]string)
-		for key, values := range r.PostForm {
-			if len(values) > 0 {
-				params[key] = values[0]
-			}
+		sig, err := base64.StdEncoding.DecodeString(signature)
+		if err != nil {
+			log.Printf("[Security] Telnyx webhook rejected: invalid signature encoding for %s", r.URL.Path)
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
 		}
 
-		keys := make([]string, 0, len(params))
-		for k := range params {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-
-		data := fullURL
-		for _, k := range keys {
-			data += k + params[k]
-		}
-
-		// Calculate HMAC-SHA1 signature
-		mac := hmac.New(sha1.New, []byte(authToken))
-		mac.Write([]byte(data))
-		expectedSig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-
-		if subtle.ConstantTimeCompare([]byte(signature), []byte(expectedSig)) != 1 {
-			log.Printf("[Security] Twilio webhook rejected: invalid signature for %s", r.URL.Path)
+		if !ed25519.Verify(ed25519.PublicKey(pubKey), []byte(signedPayload), sig) {
+			log.Printf("[Security] Telnyx webhook rejected: invalid signature for %s", r.URL.Path)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
