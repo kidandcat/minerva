@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minerva — Personal AI Assistant</title>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #0a0a0f;
+            --surface: #12121a;
+            --surface-2: #1a1a28;
+            --border: #2a2a3d;
+            --text: #e4e4ef;
+            --text-muted: #8888a0;
+            --accent: #7c6aef;
+            --accent-2: #a78bfa;
+            --accent-glow: rgba(124, 106, 239, 0.15);
+            --green: #34d399;
+            --amber: #fbbf24;
+            --rose: #f472b6;
+            --blue: #60a5fa;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        a { color: var(--accent-2); text-decoration: none; transition: color 0.2s; }
+        a:hover { color: #c4b5fd; }
+
+        code {
+            font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+            background: var(--surface-2);
+            padding: 0.15em 0.4em;
+            border-radius: 4px;
+            font-size: 0.88em;
+            border: 1px solid var(--border);
+        }
+
+        /* ── Glow background ── */
+        .glow-bg {
+            position: fixed;
+            top: -40%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 800px;
+            height: 800px;
+            background: radial-gradient(circle, rgba(124, 106, 239, 0.08) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* ── Nav ── */
+        nav {
+            position: fixed;
+            top: 0;
+            width: 100%;
+            z-index: 100;
+            background: rgba(10, 10, 15, 0.85);
+            backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border);
+        }
+        .nav-inner {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0.8rem 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .nav-logo {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .nav-logo svg { width: 24px; height: 24px; }
+        .nav-links { display: flex; gap: 1.8rem; list-style: none; }
+        .nav-links a { color: var(--text-muted); font-size: 0.9rem; font-weight: 500; }
+        .nav-links a:hover { color: var(--text); }
+        .nav-gh {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.45rem 1rem;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: background 0.2s, border-color 0.2s;
+        }
+        .nav-gh:hover { background: var(--surface); border-color: var(--accent); color: var(--text); }
+        .nav-gh svg { width: 18px; height: 18px; }
+
+        /* ── Hero ── */
+        .hero {
+            position: relative;
+            z-index: 1;
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 10rem 2rem 6rem;
+            text-align: center;
+        }
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.35rem 1rem;
+            background: var(--accent-glow);
+            border: 1px solid rgba(124, 106, 239, 0.3);
+            border-radius: 999px;
+            font-size: 0.82rem;
+            color: var(--accent-2);
+            margin-bottom: 1.5rem;
+        }
+        .hero h1 {
+            font-size: clamp(2.5rem, 6vw, 4rem);
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            line-height: 1.1;
+            margin-bottom: 1.2rem;
+        }
+        .hero h1 .gradient {
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 50%, var(--rose) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .hero p {
+            max-width: 620px;
+            margin: 0 auto 2.5rem;
+            font-size: 1.15rem;
+            color: var(--text-muted);
+            line-height: 1.7;
+        }
+        .hero-actions {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .btn-primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.8rem;
+            background: var(--accent);
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.95rem;
+            border-radius: 10px;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 8px 30px rgba(124, 106, 239, 0.35);
+            color: #fff;
+        }
+        .btn-secondary {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.8rem;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-weight: 600;
+            font-size: 0.95rem;
+            border-radius: 10px;
+            transition: background 0.2s, border-color 0.2s;
+        }
+        .btn-secondary:hover { border-color: var(--accent); background: rgba(124, 106, 239, 0.08); color: var(--text); }
+
+        /* ── Section ── */
+        section {
+            position: relative;
+            z-index: 1;
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 5rem 2rem;
+        }
+        .section-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.78rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--accent-2);
+            margin-bottom: 0.8rem;
+        }
+        .section-title {
+            font-size: clamp(1.6rem, 3vw, 2.2rem);
+            font-weight: 700;
+            margin-bottom: 1rem;
+            letter-spacing: -0.02em;
+        }
+        .section-desc {
+            max-width: 600px;
+            color: var(--text-muted);
+            font-size: 1.05rem;
+            margin-bottom: 3rem;
+        }
+
+        /* ── Feature grid ── */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.2rem;
+        }
+        .feature-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 1.8rem;
+            transition: border-color 0.25s, transform 0.2s;
+        }
+        .feature-card:hover {
+            border-color: var(--accent);
+            transform: translateY(-2px);
+        }
+        .feature-icon {
+            width: 42px;
+            height: 42px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.3rem;
+            margin-bottom: 1rem;
+        }
+        .feature-icon.purple { background: rgba(124, 106, 239, 0.15); color: var(--accent-2); }
+        .feature-icon.green  { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .feature-icon.amber  { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+        .feature-icon.rose   { background: rgba(244, 114, 182, 0.15); color: var(--rose); }
+        .feature-icon.blue   { background: rgba(96, 165, 250, 0.15);  color: var(--blue); }
+        .feature-card h3 {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        .feature-card p {
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            line-height: 1.6;
+        }
+
+        /* ── Architecture ── */
+        .arch-container {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 2.5rem;
+            overflow-x: auto;
+        }
+        .arch-diagram {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.82rem;
+            line-height: 1.5;
+            color: var(--text-muted);
+            white-space: pre;
+            min-width: 600px;
+        }
+        .arch-diagram .highlight { color: var(--accent-2); font-weight: 600; }
+        .arch-diagram .green { color: var(--green); }
+        .arch-diagram .amber { color: var(--amber); }
+        .arch-diagram .rose { color: var(--rose); }
+        .arch-diagram .blue { color: var(--blue); }
+
+        .arch-stack {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+        .arch-item {
+            padding: 1.2rem;
+            background: var(--surface-2);
+            border-radius: 10px;
+            border: 1px solid var(--border);
+        }
+        .arch-item h4 {
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 0.3rem;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .arch-item p {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+        }
+
+        /* ── Quickstart ── */
+        .quickstart-block {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            overflow: hidden;
+        }
+        .quickstart-header {
+            padding: 1rem 1.5rem;
+            background: var(--surface-2);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+        .quickstart-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+        .quickstart-dot.red { background: #ff5f57; }
+        .quickstart-dot.yellow { background: #febc2e; }
+        .quickstart-dot.green { background: #28c840; }
+        .quickstart-title {
+            margin-left: 0.5rem;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            font-family: 'SF Mono', monospace;
+        }
+        .quickstart-body {
+            padding: 1.5rem 2rem;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.88rem;
+            line-height: 2;
+            overflow-x: auto;
+        }
+        .quickstart-body .comment { color: #5c6370; }
+        .quickstart-body .command { color: var(--green); }
+        .quickstart-body .flag { color: var(--amber); }
+
+        /* ── Tools grid ── */
+        .tools-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+        }
+        .tool-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 1rem;
+            padding: 1.2rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
+        .tool-item code {
+            white-space: nowrap;
+            flex-shrink: 0;
+            font-weight: 600;
+            color: var(--accent-2);
+        }
+        .tool-item span {
+            font-size: 0.88rem;
+            color: var(--text-muted);
+        }
+
+        /* ── Footer ── */
+        footer {
+            position: relative;
+            z-index: 1;
+            border-top: 1px solid var(--border);
+            padding: 3rem 2rem;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        footer a { color: var(--text-muted); }
+        footer a:hover { color: var(--text); }
+        .footer-links {
+            display: flex;
+            gap: 2rem;
+            justify-content: center;
+            margin-bottom: 1rem;
+        }
+
+        /* ── Animations ── */
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(24px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .fade-up {
+            animation: fadeUp 0.7s ease-out both;
+        }
+        .delay-1 { animation-delay: 0.1s; }
+        .delay-2 { animation-delay: 0.2s; }
+        .delay-3 { animation-delay: 0.3s; }
+        .delay-4 { animation-delay: 0.4s; }
+
+        /* ── Responsive ── */
+        @media (max-width: 768px) {
+            .nav-links { display: none; }
+            .hero { padding: 8rem 1.2rem 4rem; }
+            section { padding: 3rem 1.2rem; }
+            .features-grid { grid-template-columns: 1fr; }
+            .arch-container { padding: 1.2rem; }
+            .quickstart-body { padding: 1rem 1.2rem; font-size: 0.8rem; }
+            .tools-grid { grid-template-columns: 1fr; }
+            .footer-links { flex-direction: column; gap: 0.8rem; }
+        }
+
+        @media (max-width: 480px) {
+            .hero h1 { font-size: 2rem; }
+            .hero-actions { flex-direction: column; align-items: center; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="glow-bg"></div>
+
+<!-- Nav -->
+<nav>
+    <div class="nav-inner">
+        <div class="nav-logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            Minerva
+        </div>
+        <ul class="nav-links">
+            <li><a href="#features">Features</a></li>
+            <li><a href="#architecture">Architecture</a></li>
+            <li><a href="#quickstart">Quick Start</a></li>
+            <li><a href="#tools">Tools</a></li>
+        </ul>
+        <a href="https://github.com/kidandcat/minerva" class="nav-gh" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+            GitHub
+        </a>
+    </div>
+</nav>
+
+<!-- Hero -->
+<header class="hero">
+    <div class="hero-badge fade-up">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+        Open Source &middot; Self-hosted &middot; Go
+    </div>
+    <h1 class="fade-up delay-1">Your personal<br><span class="gradient">AI command center</span></h1>
+    <p class="fade-up delay-2">
+        Minerva is a self-hosted AI assistant that lives in Telegram. Powered by Claude, it manages your reminders, makes phone calls, sends emails, delegates coding tasks to remote agents, and remembers everything about you.
+    </p>
+    <div class="hero-actions fade-up delay-3">
+        <a href="#quickstart" class="btn-primary">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            Get Started
+        </a>
+        <a href="https://github.com/kidandcat/minerva" class="btn-secondary" target="_blank" rel="noopener">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+            View on GitHub
+        </a>
+    </div>
+</header>
+
+<!-- Features -->
+<section id="features">
+    <span class="section-label">Features</span>
+    <h2 class="section-title">Everything you need in one binary</h2>
+    <p class="section-desc">A single Go binary that connects your AI brain to the real world — no microservices, no containers, no complexity.</p>
+
+    <div class="features-grid">
+        <div class="feature-card fade-up">
+            <div class="feature-icon purple">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            </div>
+            <h3>Telegram AI Chat</h3>
+            <p>Conversational AI via Telegram with persistent history, photo analysis, document processing, and multi-user support with admin approval.</p>
+        </div>
+
+        <div class="feature-card fade-up delay-1">
+            <div class="feature-icon green">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.362 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+            </div>
+            <h3>Voice Calls</h3>
+            <p>Real-time voice AI powered by Gemini Live. Minerva makes and answers phone calls on your behalf — reservations, inquiries, anything.</p>
+        </div>
+
+        <div class="feature-card fade-up delay-2">
+            <div class="feature-icon amber">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            </div>
+            <h3>Remote Code Agents</h3>
+            <p>Connect Claude Code instances from any machine via WebSocket. Dispatch coding tasks — git, builds, debugging — and get results in Telegram.</p>
+        </div>
+
+        <div class="feature-card fade-up delay-3">
+            <div class="feature-icon rose">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            </div>
+            <h3>Email Integration</h3>
+            <p>Send and receive emails via Resend. The AI drafts and sends messages on your behalf, and incoming emails are routed through webhooks.</p>
+        </div>
+
+        <div class="feature-card fade-up delay-4">
+            <div class="feature-icon blue">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <h3>Persistent Memory</h3>
+            <p>Minerva remembers facts about you across conversations — preferences, ongoing projects, important details. Fully AI-managed with a lightweight SQLite backend.</p>
+        </div>
+
+        <div class="feature-card fade-up delay-4">
+            <div class="feature-icon purple">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
+            <h3>Reminders &amp; Scheduling</h3>
+            <p>Schedule reminders and recurring tasks with natural language. The AI autonomously decides when to reschedule and handles follow-ups.</p>
+        </div>
+    </div>
+</section>
+
+<!-- Architecture -->
+<section id="architecture">
+    <span class="section-label">Architecture</span>
+    <h2 class="section-title">Simple by design</h2>
+    <p class="section-desc">One binary. One database. No orchestrators, no message queues, no YAML files. Minerva connects directly to the services it needs.</p>
+
+    <div class="arch-container">
+        <div class="arch-diagram"><span class="highlight">┌──────────────┐</span>     ┌──────────────────────────┐     <span class="green">┌─────────────┐</span>
+<span class="highlight">│   Telegram   │</span>◄───►│    <span class="highlight">Minerva (Go binary)</span>   │◄───►<span class="green">│  Claude CLI  │</span>
+<span class="highlight">│   Bot API    │</span>     │                          │     <span class="green">│  (AI brain)  │</span>
+<span class="highlight">└──────────────┘</span>     │  ┌────────────────────┐  │     <span class="green">└─────────────┘</span>
+                     │  │   Webhook Server   │  │
+<span class="rose">┌──────────────┐</span>     │  │  /email/webhook    │  │     <span class="amber">┌─────────────┐</span>
+<span class="rose">│   Resend     │</span>────►│  │  /agent (WS)       │  │◄───►<span class="amber">│  Remote     │</span>
+<span class="rose">│   (email)    │</span>     │  │  /voice/ws         │  │     <span class="amber">│  Agents     │</span>
+<span class="rose">└──────────────┘</span>     │  └────────────────────┘  │     <span class="amber">└─────────────┘</span>
+                     │                          │
+<span class="blue">┌──────────────┐</span>     │  ┌────────────────────┐  │     <span class="green">┌─────────────┐</span>
+<span class="blue">│ Twilio/Phone │</span>◄───►│  │     SQLite DB      │  │◄───►<span class="green">│ Gemini Live │</span>
+<span class="blue">│  (voice)     │</span>     │  └────────────────────┘  │     <span class="green">│ (voice AI)  │</span>
+<span class="blue">└──────────────┘</span>     └──────────────────────────┘     <span class="green">└─────────────┘</span></div>
+    </div>
+
+    <div class="arch-stack">
+        <div class="arch-item">
+            <h4><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-2)" stroke-width="2" stroke-linecap="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg> Single Binary</h4>
+            <p>Go monolith — bot, webhooks, WebSocket server, CLI, all in one</p>
+        </div>
+        <div class="arch-item">
+            <h4><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg> SQLite</h4>
+            <p>Zero-config embedded database — conversations, memory, tasks</p>
+        </div>
+        <div class="arch-item">
+            <h4><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> Claude CLI</h4>
+            <p>AI brain via <code>claude -p</code> with session continuity</p>
+        </div>
+        <div class="arch-item">
+            <h4><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--rose)" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg> WebSocket Agents</h4>
+            <p>Connect Claude Code from any machine for remote task execution</p>
+        </div>
+    </div>
+</section>
+
+<!-- Quick Start -->
+<section id="quickstart">
+    <span class="section-label">Quick Start</span>
+    <h2 class="section-title">Up and running in 60 seconds</h2>
+    <p class="section-desc">All you need is Go 1.24+, <a href="https://docs.anthropic.com/en/docs/claude-code">Claude CLI</a> installed, and a Telegram bot token.</p>
+
+    <div class="quickstart-block">
+        <div class="quickstart-header">
+            <span class="quickstart-dot red"></span>
+            <span class="quickstart-dot yellow"></span>
+            <span class="quickstart-dot green"></span>
+            <span class="quickstart-title">terminal</span>
+        </div>
+        <div class="quickstart-body">
+<span class="comment"># Clone the repository</span>
+<span class="command">git clone</span> https://github.com/kidandcat/minerva.git
+<span class="command">cd</span> minerva
+
+<span class="comment"># Configure (set TELEGRAM_BOT_TOKEN and ADMIN_ID)</span>
+<span class="command">cp</span> .env.example .env
+<span class="command">nano</span> .env
+
+<span class="comment"># Build and run</span>
+<span class="command">go build</span> <span class="flag">-o</span> minerva .
+<span class="command">./minerva</span>
+        </div>
+    </div>
+
+    <div class="arch-stack" style="margin-top: 2rem;">
+        <div class="arch-item">
+            <h4>Docker</h4>
+            <p>Also available: <code>docker compose up -d</code> with the included <code>docker-compose.yml</code></p>
+        </div>
+        <div class="arch-item">
+            <h4>VPS Deploy</h4>
+            <p>Cross-compile with <code>GOOS=linux GOARCH=amd64 go build</code> and deploy with systemd</p>
+        </div>
+        <div class="arch-item">
+            <h4>Caddy / Nginx</h4>
+            <p>Put behind a reverse proxy for HTTPS — needed for voice calls and email webhooks</p>
+        </div>
+        <div class="arch-item">
+            <h4>Agent Setup</h4>
+            <p>Build the agent binary separately: <code>cd agent && go build</code>, then connect via WebSocket</p>
+        </div>
+    </div>
+</section>
+
+<!-- Tools -->
+<section id="tools">
+    <span class="section-label">AI Tools</span>
+    <h2 class="section-title">Built-in capabilities</h2>
+    <p class="section-desc">The AI brain can invoke these tools autonomously during conversations to get things done on your behalf.</p>
+
+    <div class="tools-grid">
+        <div class="tool-item">
+            <code>update_memory</code>
+            <span>Persist important facts about you across all conversations</span>
+        </div>
+        <div class="tool-item">
+            <code>send_email</code>
+            <span>Send emails via Resend from verified domains</span>
+        </div>
+        <div class="tool-item">
+            <code>make_call</code>
+            <span>Initiate voice calls via Twilio with real-time Gemini AI</span>
+        </div>
+        <div class="tool-item">
+            <code>run_claude</code>
+            <span>Dispatch coding tasks to remote Claude Code agents</span>
+        </div>
+        <div class="tool-item">
+            <code>create_task</code>
+            <span>Launch long-running background tasks with progress tracking</span>
+        </div>
+        <div class="tool-item">
+            <code>run_code</code>
+            <span>Execute JavaScript in a sandboxed environment (Goja)</span>
+        </div>
+    </div>
+</section>
+
+<!-- Telegram Commands -->
+<section>
+    <span class="section-label">Telegram</span>
+    <h2 class="section-title">Bot commands</h2>
+    <p class="section-desc">Quick actions available directly in your Telegram chat.</p>
+
+    <div class="tools-grid">
+        <div class="tool-item">
+            <code>/new</code>
+            <span>Start a fresh conversation</span>
+        </div>
+        <div class="tool-item">
+            <code>/history</code>
+            <span>Browse past conversations</span>
+        </div>
+        <div class="tool-item">
+            <code>/system</code>
+            <span>Set custom AI behavior per user</span>
+        </div>
+        <div class="tool-item">
+            <code>/memory</code>
+            <span>View what Minerva remembers about you</span>
+        </div>
+        <div class="tool-item">
+            <code>/reminders</code>
+            <span>List and manage pending reminders</span>
+        </div>
+        <div class="tool-item">
+            <code>/tasks</code>
+            <span>View background task status and progress</span>
+        </div>
+    </div>
+</section>
+
+<!-- Footer -->
+<footer>
+    <div class="footer-links">
+        <a href="https://github.com/kidandcat/minerva">GitHub</a>
+        <a href="https://github.com/kidandcat/minerva/blob/main/README.md">Documentation</a>
+        <a href="https://github.com/kidandcat/minerva/blob/main/LICENSE">MIT License</a>
+        <a href="https://github.com/kidandcat/minerva/blob/main/CONTRIBUTING.md">Contributing</a>
+    </div>
+    <p>Built with Go, Claude, and Gemini. &copy; 2025 Minerva Project.</p>
+</footer>
+
+<!-- Intersection Observer for scroll animations -->
+<script>
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                entry.target.classList.add('fade-up');
+                observer.unobserve(entry.target);
+            }
+        });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.feature-card, .tool-item, .arch-item').forEach(el => {
+        el.style.opacity = '0';
+        el.style.transform = 'translateY(24px)';
+        observer.observe(el);
+    });
+</script>
+
+</body>
+</html>
