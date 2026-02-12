@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 const (
@@ -318,14 +320,19 @@ func (w *WebhookServer) handleAgentRun(rw http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Notify admin that agent started
+	// Notify admin that agent started (with kill button)
 	if w.bot != nil && w.bot.config.AdminID != 0 {
 		dir := req.Dir
 		if dir == "" {
 			dir = w.agentHub.GetAgentCwd(req.Agent)
 		}
 		notification := fmt.Sprintf("⚡ Agent launched on %s:%s", req.Agent, dir)
-		w.bot.sendMessage(w.bot.config.AdminID, notification)
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🛑 Kill", fmt.Sprintf("kill:%s", taskID)),
+			),
+		)
+		w.bot.sendMessageWithKeyboard(w.bot.config.AdminID, notification, keyboard)
 	}
 
 	rw.Header().Set("Content-Type", "application/json")

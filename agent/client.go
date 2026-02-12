@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -22,12 +23,15 @@ const (
 	MsgTypeStatus       = "status"
 	MsgTypePing         = "ping"
 	MsgTypePong         = "pong"
+	MsgTypeHeartbeat    = "heartbeat"
 	MsgTypeError        = "error"
 	MsgTypeListProjects = "list_projects"
 	MsgTypeProjects     = "projects"
 	MsgTypeKill         = "kill"
 	MsgTypeKilled       = "killed"
 )
+
+var errConnNil = fmt.Errorf("connection is nil")
 
 // Message represents a WebSocket message
 type Message struct {
@@ -102,7 +106,8 @@ func (c *Client) Run() error {
 
 		log.Printf("Connected to server")
 		c.handleMessages()
-		log.Printf("Disconnected, will reconnect...")
+		log.Printf("Disconnected, will reconnect in 5s...")
+		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -152,10 +157,30 @@ func (c *Client) send(msg Message) error {
 	defer c.connLock.Unlock()
 
 	if c.conn == nil {
-		return nil
+		return errConnNil
 	}
 	c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return c.conn.WriteJSON(msg)
+}
+
+// sendWithRetry attempts to send a message with exponential backoff.
+// Used for result messages that must not be lost.
+func (c *Client) sendWithRetry(msg Message, maxRetries int) error {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(1<<uint(attempt-1)) * 5 * time.Second // 5s, 10s, 20s
+			log.Printf("[Task %s] Retry %d/%d in %v...", msg.ID, attempt, maxRetries, delay)
+			time.Sleep(delay)
+		}
+
+		lastErr = c.send(msg)
+		if lastErr == nil {
+			return nil
+		}
+		log.Printf("[Task %s] Send attempt %d failed: %v", msg.ID, attempt+1, lastErr)
+	}
+	return fmt.Errorf("all %d send attempts failed, last error: %w", maxRetries+1, lastErr)
 }
 
 // closeConn closes the current connection (safe to call multiple times)
@@ -315,7 +340,30 @@ func (c *Client) handleTask(task Message) {
 			c.runningTasks.Delete(task.ID)
 		}()
 
+		// Start heartbeat goroutine - sends periodic heartbeats while task is running
+		heartbeatDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(2 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-heartbeatDone:
+					return
+				case <-ticker.C:
+					if err := c.send(Message{
+						Type: MsgTypeHeartbeat,
+						ID:   task.ID,
+					}); err != nil {
+						log.Printf("[Task %s] Heartbeat send failed: %v", task.ID, err)
+					} else {
+						log.Printf("[Task %s] Heartbeat sent (running %v)", task.ID, time.Since(start).Round(time.Second))
+					}
+				}
+			}
+		}()
+
 		result := c.executor.Wait(cmd, stdout, stderr, start)
+		close(heartbeatDone)
 
 		// Check if the task was killed (context cancelled)
 		if ctx.Err() == context.Canceled {
@@ -335,8 +383,10 @@ func (c *Client) handleTask(task Message) {
 		log.Printf("[Task %s] Completed: exit=%d, output=%d bytes, duration=%dms",
 			task.ID, result.ExitCode, len(result.Output), result.DurationMs)
 
-		if err := c.send(msg); err != nil {
-			log.Printf("[Task %s] Failed to send result: %v", task.ID, err)
+		// Use retry logic for result delivery - this is critical data
+		if err := c.sendWithRetry(msg, 3); err != nil {
+			log.Printf("[Task %s] CRITICAL: Failed to deliver result after retries: %v", task.ID, err)
+			log.Printf("[Task %s] Lost output (%d bytes): %s", task.ID, len(result.Output), truncate(result.Output, 500))
 		} else {
 			log.Printf("[Task %s] Result sent successfully", task.ID)
 		}

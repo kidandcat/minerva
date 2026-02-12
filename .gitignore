@@ -42,3 +42,6 @@ android-app/bridge/app/build/
 # Temporary files
 *.log
 *.tmp
+
+# Script state files
+.pr-reviews-notified

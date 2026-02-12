@@ -20,10 +20,18 @@ const (
 	AgentMsgResult       = "result"
 	AgentMsgPing         = "ping"
 	AgentMsgPong         = "pong"
+	AgentMsgHeartbeat    = "heartbeat"
 	AgentMsgListProjects = "list_projects"
 	AgentMsgProjects     = "projects"
 	AgentMsgKill         = "kill"
 	AgentMsgKilled       = "killed"
+)
+
+const (
+	// TaskStaleThreshold is how long a task can go without a heartbeat before being considered stale
+	TaskStaleThreshold = 10 * time.Minute
+	// TaskWatchdogInterval is how often we check for stale tasks
+	TaskWatchdogInterval = 2 * time.Minute
 )
 
 // AgentMessage represents a message to/from an agent
@@ -62,9 +70,12 @@ type Agent struct {
 
 // ActiveTask holds information about a running task
 type ActiveTask struct {
-	StartTime time.Time
-	MessageID int  // Telegram message ID for the confirmation message with Kill button
-	ChatID    int64
+	StartTime     time.Time
+	LastHeartbeat time.Time
+	Prompt        string // first 100 chars for identification
+	Killed        bool
+	MessageID     int   // Telegram message ID for the confirmation message with Kill button
+	ChatID        int64
 }
 
 // PendingProjectReq represents a request waiting for a project list response
@@ -101,11 +112,12 @@ type AgentHub struct {
 	onTaskStart    TaskStartFunc
 	mu             sync.RWMutex
 	upgrader       websocket.Upgrader
+	stopWatchdog   chan struct{}
 }
 
 // NewAgentHub creates a new agent hub
 func NewAgentHub(password string, notify NotifyFunc, onResult ResultFunc) *AgentHub {
-	return &AgentHub{
+	h := &AgentHub{
 		agents:        make(map[string]*Agent),
 		projectReqs:   make(map[string]*PendingProjectReq),
 		pendingAcks:   make(map[string]*PendingAck),
@@ -117,6 +129,72 @@ func NewAgentHub(password string, notify NotifyFunc, onResult ResultFunc) *Agent
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+		stopWatchdog: make(chan struct{}),
+	}
+	go h.taskWatchdog()
+	return h
+}
+
+// taskWatchdog periodically checks for stale tasks that haven't sent a heartbeat
+func (h *AgentHub) taskWatchdog() {
+	ticker := time.NewTicker(TaskWatchdogInterval)
+	defer ticker.Stop()
+
+	// Track which tasks we've already alerted about to avoid spam
+	alerted := make(map[string]bool)
+
+	for {
+		select {
+		case <-h.stopWatchdog:
+			return
+		case <-ticker.C:
+			h.mu.RLock()
+			for agentName, agent := range h.agents {
+				agent.activeTasks.Range(func(key, value any) bool {
+					taskID := key.(string)
+					info := value.(*ActiveTask)
+					alertKey := agentName + ":" + taskID
+
+					sinceHeartbeat := time.Since(info.LastHeartbeat)
+					sinceStart := time.Since(info.StartTime)
+
+					if sinceHeartbeat > TaskStaleThreshold && !alerted[alertKey] {
+						alerted[alertKey] = true
+						log.Printf("[Watchdog] STALE task %s on agent '%s': no heartbeat for %v (started %v ago, prompt: %s)",
+							taskID, agentName, sinceHeartbeat.Round(time.Second), sinceStart.Round(time.Second), info.Prompt)
+						if h.notify != nil {
+							h.notify(fmt.Sprintf("⚠️ Task stuck on agent '%s': no heartbeat for %v\nStarted: %v ago\nTask: %s",
+								agentName, sinceHeartbeat.Round(time.Minute), sinceStart.Round(time.Minute), info.Prompt))
+						}
+					}
+					return true
+				})
+			}
+			h.mu.RUnlock()
+
+			// Clean up alerts for tasks that no longer exist
+			for alertKey := range alerted {
+				// Parse agentName from alertKey
+				found := false
+				h.mu.RLock()
+				for agentName, agent := range h.agents {
+					agent.activeTasks.Range(func(key, _ any) bool {
+						if agentName+":"+key.(string) == alertKey {
+							found = true
+							return false
+						}
+						return true
+					})
+					if found {
+						break
+					}
+				}
+				h.mu.RUnlock()
+				if !found {
+					delete(alerted, alertKey)
+				}
+			}
+		}
 	}
 }
 
@@ -236,12 +314,15 @@ func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 	}
 
 	taskID := fmt.Sprintf("%d", time.Now().UnixNano())
+	now := time.Now()
 
 	// Track active task on this agent (will update with messageID after callback)
 	agent.activeTasks.Store(taskID, &ActiveTask{
-		StartTime: time.Now(),
-		MessageID: 0, // Will be set by callback after Telegram message sent
-		ChatID:    0, // Will be set by callback after Telegram message sent
+		StartTime:     now,
+		LastHeartbeat: now,
+		Prompt:        truncateText(prompt, 100),
+		MessageID:     0, // Will be set by callback after Telegram message sent
+		ChatID:        0, // Will be set by callback after Telegram message sent
 	})
 
 	// Store task -> agent mapping for kill functionality
@@ -261,24 +342,22 @@ func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 		h.mu.Unlock()
 	}
 
-	// Send task to agent
+	// Send task to agent (safe send to avoid panic on closed channel during reconnection)
 	msg := AgentMessage{
 		Type:   AgentMsgTask,
 		ID:     taskID,
 		Prompt: prompt,
 		Dir:    dir,
 	}
-	select {
-	case agent.send <- msg:
-		log.Printf("[Agent] Task %s sent to '%s' (dir: %s), waiting for ACK...", taskID, agentName, dir)
-	default:
+	if !safeSendAgent(agent.send, msg) {
 		cleanup()
 		agent.activeTasks.Delete(taskID)
 		h.mu.Lock()
 		delete(h.taskAgentMap, taskID)
 		h.mu.Unlock()
-		return "", fmt.Errorf("agent '%s' send channel full", agentName)
+		return "", fmt.Errorf("agent '%s' send channel full or closed", agentName)
 	}
+	log.Printf("[Agent] Task %s sent to '%s' (dir: %s), waiting for ACK...", taskID, agentName, dir)
 
 	// Wait for ACK (agent confirms Claude started or reports error)
 	select {
@@ -341,42 +420,24 @@ func (h *AgentHub) UpdateTaskMessage(taskID string, messageID int, chatID int64)
 	return nil
 }
 
-// KillTask sends a kill signal to the agent running the specified task
+// KillTask sends a kill signal to the agent running the given task
 func (h *AgentHub) KillTask(taskID string) error {
 	h.mu.RLock()
-	agentName, ok := h.taskAgentMap[taskID]
-	h.mu.RUnlock()
+	defer h.mu.RUnlock()
 
-	if !ok {
-		return fmt.Errorf("task '%s' not found or already completed", taskID)
+	for _, agent := range h.agents {
+		if val, ok := agent.activeTasks.Load(taskID); ok {
+			info := val.(*ActiveTask)
+			info.Killed = true
+			msg := AgentMessage{Type: AgentMsgKill, ID: taskID}
+			if !safeSendAgent(agent.send, msg) {
+				return fmt.Errorf("failed to send kill signal (channel full or closed)")
+			}
+			log.Printf("[AgentHub] Kill signal sent for task %s", taskID)
+			return nil
+		}
 	}
-
-	h.mu.RLock()
-	agent, ok := h.agents[agentName]
-	h.mu.RUnlock()
-
-	if !ok {
-		return fmt.Errorf("agent '%s' not connected", agentName)
-	}
-
-	// Send kill message to agent
-	killMsg := AgentMessage{
-		Type: AgentMsgKill,
-		ID:   taskID,
-	}
-
-	select {
-	case agent.send <- killMsg:
-		log.Printf("[AgentHub] Kill signal sent to agent '%s' for task %s", agentName, taskID)
-		// Remove from active tasks and task map
-		agent.activeTasks.Delete(taskID)
-		h.mu.Lock()
-		delete(h.taskAgentMap, taskID)
-		h.mu.Unlock()
-		return nil
-	default:
-		return fmt.Errorf("agent '%s' send channel full", agentName)
-	}
+	return fmt.Errorf("task %s not found on any agent", taskID)
 }
 
 // GetTaskMessageID returns the Telegram message ID for a task (used to update the Kill button)
@@ -406,6 +467,21 @@ func (h *AgentHub) GetTaskMessageID(taskID string) (int, int64, error) {
 	return 0, 0, fmt.Errorf("task info not found")
 }
 
+// safeSendAgent sends a message to an agent channel, recovering from panic if the channel was closed.
+func safeSendAgent(ch chan AgentMessage, msg AgentMessage) (sent bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			sent = false
+		}
+	}()
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *AgentHub) registerAgent(agent *Agent, password string) bool {
 	// Verify password using constant-time comparison to prevent timing attacks
 	if h.password != "" && subtle.ConstantTimeCompare([]byte(password), []byte(h.password)) != 1 {
@@ -417,8 +493,10 @@ func (h *AgentHub) registerAgent(agent *Agent, password string) bool {
 	defer h.mu.Unlock()
 
 	// Close existing agent with same name
+	replaced := false
 	if existing, ok := h.agents[agent.Name]; ok {
 		close(existing.send)
+		replaced = true
 	}
 
 	h.agents[agent.Name] = agent
@@ -429,6 +507,8 @@ func (h *AgentHub) registerAgent(agent *Agent, password string) bool {
 		timer.Stop()
 		delete(h.disconnTimers, agent.Name)
 		// Silent reconnect - no notifications
+	} else if replaced {
+		// Replaced existing connection - silent (avoids spam during reconnect loops)
 	} else if h.notify != nil {
 		h.notify(fmt.Sprintf("🟢 Agent '%s' connected", agent.Name))
 	}
@@ -442,6 +522,16 @@ func (h *AgentHub) unregisterAgent(agent *Agent) {
 		delete(h.agents, agent.Name)
 		log.Printf("Agent '%s' disconnected", agent.Name)
 
+		// Check for orphaned tasks
+		var orphanedTasks []string
+		agent.activeTasks.Range(func(key, value any) bool {
+			taskID := key.(string)
+			info := value.(*ActiveTask)
+			orphanedTasks = append(orphanedTasks, fmt.Sprintf("  - %s (running %v): %s",
+				taskID, time.Since(info.StartTime).Round(time.Second), info.Prompt))
+			return true
+		})
+
 		// Debounce: wait 10s before notifying, in case agent reconnects quickly
 		name := agent.Name
 		if h.notify != nil {
@@ -452,7 +542,14 @@ func (h *AgentHub) unregisterAgent(agent *Agent) {
 				_, reconnected := h.agents[name]
 				h.mu.Unlock()
 				if !reconnected {
-					h.notify(fmt.Sprintf("🔴 Agent '%s' disconnected", name))
+					msg := fmt.Sprintf("🔴 Agent '%s' disconnected", name)
+					if len(orphanedTasks) > 0 {
+						msg += fmt.Sprintf("\n⚠️ %d task(s) were running and may be lost:\n", len(orphanedTasks))
+						for _, t := range orphanedTasks {
+							msg += t + "\n"
+						}
+					}
+					h.notify(msg)
 				}
 			})
 		}
@@ -461,9 +558,27 @@ func (h *AgentHub) unregisterAgent(agent *Agent) {
 	h.mu.Unlock()
 }
 
+func (h *AgentHub) handleHeartbeat(agentName string, msg AgentMessage) {
+	h.mu.RLock()
+	agent, ok := h.agents[agentName]
+	h.mu.RUnlock()
+
+	if !ok {
+		return
+	}
+
+	if val, ok := agent.activeTasks.Load(msg.ID); ok {
+		info := val.(*ActiveTask)
+		info.LastHeartbeat = time.Now()
+		log.Printf("[AgentHub] Heartbeat from '%s' for task %s (running %v)",
+			agentName, msg.ID, time.Since(info.StartTime).Round(time.Second))
+	}
+}
+
 func (h *AgentHub) handleResult(agentName string, msg AgentMessage) {
-	log.Printf("[AgentHub] Result from '%s': task=%s, exit=%d, output=%d bytes, error=%q, duration=%dms",
-		agentName, msg.ID, msg.ExitCode, len(msg.Output), msg.Error, msg.Duration)
+	// Calculate server-side tracking duration
+	var trackingInfo string
+	var killed bool
 
 	// Remove from active tasks and task map
 	h.mu.Lock()
@@ -472,9 +587,17 @@ func (h *AgentHub) handleResult(agentName string, msg AgentMessage) {
 
 	h.mu.RLock()
 	if agent, ok := h.agents[agentName]; ok {
+		if val, ok := agent.activeTasks.Load(msg.ID); ok {
+			info := val.(*ActiveTask)
+			trackingInfo = fmt.Sprintf(", tracked_duration=%v", time.Since(info.StartTime).Round(time.Second))
+			killed = info.Killed
+		}
 		agent.activeTasks.Delete(msg.ID)
 	}
 	h.mu.RUnlock()
+
+	log.Printf("[AgentHub] Result from '%s': task=%s, exit=%d, output=%d bytes, error=%q, duration=%dms, killed=%v%s",
+		agentName, msg.ID, msg.ExitCode, len(msg.Output), msg.Error, msg.Duration, killed, trackingInfo)
 
 	if h.onResult == nil {
 		log.Printf("[AgentHub] WARNING: onResult callback is nil, dropping result")
@@ -482,7 +605,12 @@ func (h *AgentHub) handleResult(agentName string, msg AgentMessage) {
 	}
 
 	var text string
-	if msg.Error != "" {
+	if killed {
+		text = fmt.Sprintf("[AGENT %s] 🛑 Task killed by user", agentName)
+		if msg.Output != "" {
+			text += fmt.Sprintf("\n\nPartial output:\n%s", truncateText(msg.Output, 3500))
+		}
+	} else if msg.Error != "" {
 		text = fmt.Sprintf("[AGENT %s] Error: %s", agentName, msg.Error)
 		if msg.Output != "" {
 			text += fmt.Sprintf("\n\nOutput:\n%s", truncateText(msg.Output, 3500))
@@ -545,11 +673,14 @@ func (a *Agent) readPump() {
 		a.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		return nil
 	})
+	// IMPORTANT: Do NOT write to the connection from PingHandler.
+	// PingHandler runs in the readPump goroutine, and ANY write (even WriteControl)
+	// can race with writePump's writes, causing "concurrent write" panics.
+	// The agent's read deadline is reset by application-level pongs from writePump,
+	// so missing WebSocket-level pongs is fine.
 	a.conn.SetPingHandler(func(string) error {
 		a.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-		// Send pong back (default behavior we need to preserve)
-		a.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		return a.conn.WriteMessage(websocket.PongMessage, nil)
+		return nil
 	})
 
 	for {
@@ -580,6 +711,9 @@ func (a *Agent) readPump() {
 		case AgentMsgResult:
 			a.hub.handleResult(a.Name, msg)
 
+		case AgentMsgHeartbeat:
+			a.hub.handleHeartbeat(a.Name, msg)
+
 		case AgentMsgProjects:
 			a.hub.handleProjectsResult(msg)
 
@@ -599,6 +733,9 @@ func (a *Agent) readPump() {
 func (a *Agent) writePump() {
 	ticker := time.NewTicker(25 * time.Second)
 	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Agent '%s' writePump panic (recovered): %v", a.Name, r)
+		}
 		ticker.Stop()
 		a.conn.Close()
 	}()
@@ -616,12 +753,8 @@ func (a *Agent) writePump() {
 			}
 
 		case <-ticker.C:
-			// Send WebSocket protocol ping (keeps proxies/LBs alive)
-			a.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := a.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-			// Also send application-level ping
+			// Send application-level ping only (no WebSocket-level WriteMessage
+			// to avoid concurrent write panics with PingHandler in readPump)
 			a.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := a.conn.WriteJSON(AgentMessage{Type: AgentMsgPing}); err != nil {
 				return
