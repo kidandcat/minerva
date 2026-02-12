@@ -231,7 +231,33 @@ func (s *Scheduler) checkTasks() {
 func (s *Scheduler) executeTask(task ScheduledTask) {
 	log.Printf("[Scheduler] Executing task %d: %s (agent: %s, dir: %s)", task.ID, task.Description, task.AgentName, task.WorkingDir)
 
-	// Notify user about task starting
+	// No agent = send to AI brain (simple reminders, notifications)
+	if task.AgentName == "" {
+		s.executeBrainTask(task)
+		return
+	}
+
+	// Agent task: dispatch to remote agent
+	s.executeAgentTask(task)
+}
+
+func (s *Scheduler) executeBrainTask(task ScheduledTask) {
+	s.bot.sendMessage(s.bot.config.AdminID, fmt.Sprintf("⏰ Scheduled reminder:\n*%s*", task.Description))
+
+	eventMsg := fmt.Sprintf("[SCHEDULED TASK FIRED] The following scheduled task has triggered:\n\n%s\n\nPlease handle this appropriately - send a message to the user, take action, or do whatever is needed.", task.Description)
+	err := s.bot.ProcessSystemEvent(s.bot.config.AdminID, eventMsg)
+	if err != nil {
+		log.Printf("[Scheduler] Brain task %d failed: %v", task.ID, err)
+		s.db.UpdateScheduledTaskStatus(task.ID, "failed", err.Error())
+	} else {
+		s.db.UpdateScheduledTaskStatus(task.ID, "completed", "processed by brain")
+		log.Printf("[Scheduler] Brain task %d completed", task.ID)
+	}
+
+	s.handleRecurring(task)
+}
+
+func (s *Scheduler) executeAgentTask(task ScheduledTask) {
 	s.bot.sendMessage(s.bot.config.AdminID, fmt.Sprintf("⏰ Scheduled task starting:\n*%s*\nAgent: %s", task.Description, task.AgentName))
 
 	if s.agentHub == nil {

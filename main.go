@@ -619,7 +619,7 @@ func handleScheduleCLI(db *DB, args []string) {
 
 	switch subcmd {
 	case "create":
-		if len(subargs) < 3 {
+		if len(subargs) < 1 {
 			fmt.Fprintf(os.Stderr, "error: usage: minerva schedule create \"task description\" --at \"2026-02-10T16:00:00+01:00\" [--agent name] [--dir /path] [--recurring daily|weekly|monthly]\n")
 			os.Exit(1)
 		}
@@ -649,10 +649,6 @@ func handleScheduleCLI(db *DB, args []string) {
 			fmt.Fprintf(os.Stderr, "error: --at flag is required\n")
 			os.Exit(1)
 		}
-		if agentName == "" {
-			fmt.Fprintf(os.Stderr, "error: --agent flag is required\n")
-			os.Exit(1)
-		}
 
 		t, err := time.Parse(time.RFC3339, scheduledAt)
 		if err != nil {
@@ -674,15 +670,19 @@ func handleScheduleCLI(db *DB, args []string) {
 			os.Exit(1)
 		}
 
+		target := agentName
+		if target == "" {
+			target = "brain"
+		}
 		result, _ := json.Marshal(map[string]any{
 			"success":      true,
 			"id":           id,
 			"description":  description,
 			"scheduled_at": t.Format(time.RFC3339),
-			"agent":        agentName,
+			"agent":        target,
 			"dir":          workingDir,
 			"recurring":    recurring,
-			"message":      fmt.Sprintf("Task scheduled for %s", t.Format("Jan 2, 2006 at 15:04")),
+			"message":      fmt.Sprintf("Task scheduled for %s (target: %s)", t.Format("Jan 2, 2006 at 15:04"), target),
 		})
 		fmt.Println(string(result))
 
@@ -705,11 +705,15 @@ func handleScheduleCLI(db *DB, args []string) {
 
 		var results []taskResult
 		for _, t := range tasks {
+			agent := t.AgentName
+			if agent == "" {
+				agent = "brain"
+			}
 			results = append(results, taskResult{
 				ID:          t.ID,
 				Description: t.Description,
 				ScheduledAt: t.ScheduledAt.Format(time.RFC3339),
-				Agent:       t.AgentName,
+				Agent:       agent,
 				Dir:         t.WorkingDir,
 				Status:      t.Status,
 				Recurring:   t.Recurring,

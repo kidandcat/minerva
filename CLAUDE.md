@@ -52,10 +52,6 @@ See `.env.example` for the full list. Key variables:
 
 ```bash
 minerva                                                    # Run Telegram bot (default)
-minerva reminder create "text" --at "2024-02-06T10:00:00Z" # Create reminder
-minerva reminder list                                      # List pending reminders
-minerva reminder delete <id>                               # Dismiss reminder
-minerva reminder reschedule <id> --at "time"               # Reschedule reminder
 minerva memory get [key]                                   # Get user memory
 minerva memory set "content"                               # Set user memory
 minerva send "message"                                     # Send Telegram message to admin
@@ -67,7 +63,7 @@ minerva phone call <number> "purpose"                      # Call via Android ph
 minerva agent list                                         # List connected agents
 minerva agent run <name> "prompt" [--dir /path]            # Run task on agent
 minerva file send <path> ["caption"]                       # Send file to admin via Telegram
-minerva schedule create "task" --at "time" --agent name [--dir /path] [--recurring daily|weekly|monthly]
+minerva schedule create "task" --at "time" [--agent name] [--dir /path] [--recurring daily|weekly|monthly]
 minerva schedule list                                      # List scheduled tasks
 minerva schedule delete <id>                               # Delete scheduled task
 minerva schedule run <id>                                  # Manually trigger task
@@ -101,12 +97,13 @@ tools are exposed as CLI commands that Claude executes via its built-in Bash too
 | `/agent/run` | POST | Run task on agent `{"agent":"...", "prompt":"...", "dir":"..."}` |
 | `/email/webhook` | POST | Resend inbound email webhook (Svix-signed) |
 
-## Reminders System
+## Scheduled Tasks System
 
-Status flow: `pending` -> `fired` -> `done`
-- All fired reminders go through AI brain for autonomous processing
-- Brain decides whether to reschedule (recurring tasks, follow-ups)
-- Only the user can dismiss reminders via `/reminders` or `delete_reminder` tool
+Unified scheduling for both reminders and autonomous agent tasks:
+- **Without `--agent`**: Task fires to the AI brain, which sends a Telegram notification and handles it
+- **With `--agent`**: Task is dispatched to a connected remote agent for autonomous execution
+- Status flow: `pending` -> `running` -> `completed`/`failed`
+- Recurring options: `daily`, `weekly`, `monthly`
 
 ## Voice Calls (Telnyx + Gemini Live)
 
