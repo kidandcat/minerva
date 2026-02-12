@@ -52,6 +52,13 @@ See `.env.example` for the full list. Key variables:
 
 ```bash
 minerva                                                    # Run Telegram bot (default)
+minerva schedule create "task" --at "time" [--agent name] [--dir /path] [--recurring daily|weekly|monthly]
+                                                           # Schedule a task (simple reminder or agent task)
+                                                           # No --agent = AI brain reminder
+                                                           # With --agent = autonomous code task
+minerva schedule list                                      # List scheduled tasks
+minerva schedule delete <id>                               # Delete scheduled task
+minerva schedule run <id>                                  # Manually trigger task
 minerva memory get [key]                                   # Get user memory
 minerva memory set "content"                               # Set user memory
 minerva send "message"                                     # Send Telegram message to admin
@@ -63,10 +70,6 @@ minerva phone call <number> "purpose"                      # Call via Android ph
 minerva agent list                                         # List connected agents
 minerva agent run <name> "prompt" [--dir /path]            # Run task on agent
 minerva file send <path> ["caption"]                       # Send file to admin via Telegram
-minerva schedule create "task" --at "time" [--agent name] [--dir /path] [--recurring daily|weekly|monthly]
-minerva schedule list                                      # List scheduled tasks
-minerva schedule delete <id>                               # Delete scheduled task
-minerva schedule run <id>                                  # Manually trigger task
 ```
 
 ## AI Brain (Claude CLI)
@@ -104,6 +107,7 @@ Unified scheduling for both reminders and autonomous agent tasks:
 - **With `--agent`**: Task is dispatched to a connected remote agent for autonomous execution
 - Status flow: `pending` -> `running` -> `completed`/`failed`
 - Recurring options: `daily`, `weekly`, `monthly`
+- Tasks can be managed via `minerva schedule` CLI commands
 
 ## Voice Calls (Telnyx + Gemini Live)
 

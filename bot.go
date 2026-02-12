@@ -161,67 +161,113 @@ func (b *Bot) ProcessSystemEvent(userID int64, eventMessage string) error {
 func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) error {
 	data := callback.Data
 
-	// Parse callback data: "approve:USER_ID" or "reject:USER_ID"
+	// Parse callback data: "approve:USER_ID", "reject:USER_ID", or "kill_task:TASK_ID"
 	parts := strings.Split(data, ":")
 	if len(parts) != 2 {
 		return nil
 	}
 
 	action := parts[0]
-	userID, err := strconv.ParseInt(parts[1], 10, 64)
+
+	switch action {
+	case "kill_task":
+		taskID := parts[1]
+		return b.handleKillTask(callback, taskID)
+
+	case "approve":
+		userID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return err
+		}
+		return b.handleApprove(callback, userID)
+
+	case "reject":
+		userID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return err
+		}
+		return b.handleReject(callback, userID)
+	}
+
+	return nil
+}
+
+// handleKillTask kills a running agent task
+func (b *Bot) handleKillTask(callback *tgbotapi.CallbackQuery, taskID string) error {
+	// Kill the task
+	if err := b.agentHub.KillTask(taskID); err != nil {
+		b.api.Send(tgbotapi.NewCallback(callback.ID, fmt.Sprintf("Error: %v", err)))
+		return err
+	}
+
+	// Update the message to remove the button and show it was killed
+	editMsg := tgbotapi.NewEditMessageText(
+		callback.Message.Chat.ID,
+		callback.Message.MessageID,
+		fmt.Sprintf("%s\n\n⛔ *Killed by user*", callback.Message.Text),
+	)
+	editMsg.ParseMode = "Markdown"
+	if _, err := b.api.Send(editMsg); err != nil {
+		log.Printf("Failed to update kill message: %v", err)
+	}
+
+	// Answer callback
+	b.api.Send(tgbotapi.NewCallback(callback.ID, "Task killed"))
+	return nil
+}
+
+// handleApprove handles user approval
+func (b *Bot) handleApprove(callback *tgbotapi.CallbackQuery, userID int64) error {
+	// Approve the user
+	if err := b.db.ApproveUser(userID); err != nil {
+		return err
+	}
+
+	// Get user info
+	user, err := b.db.GetUser(userID)
 	if err != nil {
 		return err
 	}
 
-	switch action {
-	case "approve":
-		// Approve the user
-		if err := b.db.ApproveUser(userID); err != nil {
-			return err
-		}
+	// Update the admin message
+	editMsg := tgbotapi.NewEditMessageText(
+		callback.Message.Chat.ID,
+		callback.Message.MessageID,
+		fmt.Sprintf("✅ *Approved*\n\nID: `%d`\nUsername: @%s\nName: %s",
+			user.ID, user.Username, user.FirstName),
+	)
+	editMsg.ParseMode = "Markdown"
+	b.api.Send(editMsg)
 
-		// Get user info
-		user, err := b.db.GetUser(userID)
-		if err != nil {
-			return err
-		}
+	// Notify the user
+	b.sendMessage(userID, "✅ You have been approved! You can now use Minerva. Send /start to begin.")
 
-		// Update the admin message
-		editMsg := tgbotapi.NewEditMessageText(
-			callback.Message.Chat.ID,
-			callback.Message.MessageID,
-			fmt.Sprintf("✅ *Approved*\n\nID: `%d`\nUsername: @%s\nName: %s",
-				user.ID, user.Username, user.FirstName),
-		)
-		editMsg.ParseMode = "Markdown"
-		b.api.Send(editMsg)
+	// Answer callback
+	b.api.Send(tgbotapi.NewCallback(callback.ID, "User approved"))
 
-		// Notify the user
-		b.sendMessage(userID, "✅ You have been approved! You can now use Minerva. Send /start to begin.")
+	return nil
+}
 
-		// Answer callback
-		b.api.Send(tgbotapi.NewCallback(callback.ID, "User approved"))
-
-	case "reject":
-		// Just remove the buttons (don't delete user, they can try again)
-		user, err := b.db.GetUser(userID)
-		if err != nil {
-			return err
-		}
-
-		// Update the admin message to show rejected
-		editMsg := tgbotapi.NewEditMessageText(
-			callback.Message.Chat.ID,
-			callback.Message.MessageID,
-			fmt.Sprintf("❌ *Rejected*\n\nID: `%d`\nUsername: @%s\nName: %s",
-				user.ID, user.Username, user.FirstName),
-		)
-		editMsg.ParseMode = "Markdown"
-		b.api.Send(editMsg)
-
-		// Answer callback
-		b.api.Send(tgbotapi.NewCallback(callback.ID, "Request rejected"))
+// handleReject handles user rejection
+func (b *Bot) handleReject(callback *tgbotapi.CallbackQuery, userID int64) error {
+	// Just remove the buttons (don't delete user, they can try again)
+	user, err := b.db.GetUser(userID)
+	if err != nil {
+		return err
 	}
+
+	// Update the admin message to show rejected
+	editMsg := tgbotapi.NewEditMessageText(
+		callback.Message.Chat.ID,
+		callback.Message.MessageID,
+		fmt.Sprintf("❌ *Rejected*\n\nID: `%d`\nUsername: @%s\nName: %s",
+			user.ID, user.Username, user.FirstName),
+	)
+	editMsg.ParseMode = "Markdown"
+	b.api.Send(editMsg)
+
+	// Answer callback
+	b.api.Send(tgbotapi.NewCallback(callback.ID, "Request rejected"))
 
 	return nil
 }
@@ -607,6 +653,44 @@ func (b *Bot) sendDocument(chatID int64, filename string, data []byte) error {
 func (b *Bot) sendTypingAction(chatID int64) {
 	action := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
 	b.api.Send(action)
+}
+
+// sendAgentTaskStartedMessage sends a confirmation message with Kill button when an agent task starts
+func (b *Bot) sendAgentTaskStartedMessage(taskID, agentName, prompt string) {
+	if b.config.AdminID == 0 {
+		return
+	}
+
+	// Truncate prompt for display
+	displayPrompt := prompt
+	if len(displayPrompt) > 100 {
+		displayPrompt = displayPrompt[:100] + "..."
+	}
+
+	text := fmt.Sprintf("🚀 *Agent task started*\n\nAgent: `%s`\nTask ID: `%s`\nPrompt: %s",
+		agentName, taskID, displayPrompt)
+
+	msg := tgbotapi.NewMessage(b.config.AdminID, text)
+	msg.ParseMode = "Markdown"
+
+	// Add Kill button (red/dangerous style via emoji)
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⛔ Kill", fmt.Sprintf("kill_task:%s", taskID)),
+		),
+	)
+	msg.ReplyMarkup = keyboard
+
+	sentMsg, err := b.api.Send(msg)
+	if err != nil {
+		log.Printf("Failed to send agent task started message: %v", err)
+		return
+	}
+
+	// Store the message ID in the task so we can update it later
+	if err := b.agentHub.UpdateTaskMessage(taskID, sentMsg.MessageID, b.config.AdminID); err != nil {
+		log.Printf("Failed to update task message ID: %v", err)
+	}
 }
 
 func truncate(s string, n int) string {

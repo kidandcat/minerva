@@ -25,6 +25,8 @@ const (
 	MsgTypeError        = "error"
 	MsgTypeListProjects = "list_projects"
 	MsgTypeProjects     = "projects"
+	MsgTypeKill         = "kill"
+	MsgTypeKilled       = "killed"
 )
 
 // Message represents a WebSocket message
@@ -49,6 +51,12 @@ type Message struct {
 	Duration int64  `json:"duration_ms,omitempty"`
 }
 
+// RunningTask represents a task that is currently executing
+type RunningTask struct {
+	cancel context.CancelFunc
+	cmd    *os.Process
+}
+
 // Client handles the connection to Minerva
 type Client struct {
 	serverURL  string
@@ -59,7 +67,8 @@ type Client struct {
 	conn     *websocket.Conn
 	connLock sync.Mutex
 
-	executor *Executor
+	executor     *Executor
+	runningTasks sync.Map // taskID -> *RunningTask
 
 	done chan struct{}
 }
@@ -205,6 +214,8 @@ func (c *Client) handleMessages() {
 		switch msg.Type {
 		case MsgTypeTask:
 			go c.handleTask(msg)
+		case MsgTypeKill:
+			c.handleKill(msg)
 		case MsgTypeListProjects:
 			c.send(Message{
 				Type:     MsgTypeProjects,
@@ -282,6 +293,12 @@ func (c *Client) handleTask(task Message) {
 		return
 	}
 
+	// Register the running task for kill functionality
+	c.runningTasks.Store(task.ID, &RunningTask{
+		cancel: cancel,
+		cmd:    cmd.Process,
+	})
+
 	// Send ACK - claude started successfully
 	log.Printf("[Task %s] Claude started, sending ACK", task.ID)
 	if err := c.send(Message{
@@ -293,8 +310,19 @@ func (c *Client) handleTask(task Message) {
 
 	// Wait for completion in background, then send result
 	go func() {
-		defer cancel()
+		defer func() {
+			cancel()
+			c.runningTasks.Delete(task.ID)
+		}()
+
 		result := c.executor.Wait(cmd, stdout, stderr, start)
+
+		// Check if the task was killed (context cancelled)
+		if ctx.Err() == context.Canceled {
+			// Task was killed, don't send result (killed message already sent)
+			log.Printf("[Task %s] Task was killed, not sending result", task.ID)
+			return
+		}
 
 		msg := Message{
 			Type:     MsgTypeResult,
@@ -313,6 +341,38 @@ func (c *Client) handleTask(task Message) {
 			log.Printf("[Task %s] Result sent successfully", task.ID)
 		}
 	}()
+}
+
+func (c *Client) handleKill(msg Message) {
+	log.Printf("[Task %s] Kill signal received", msg.ID)
+
+	val, ok := c.runningTasks.Load(msg.ID)
+	if !ok {
+		log.Printf("[Task %s] Task not found or already completed", msg.ID)
+		return
+	}
+
+	runningTask := val.(*RunningTask)
+
+	// Kill the process
+	if runningTask.cmd != nil {
+		log.Printf("[Task %s] Killing process PID %d", msg.ID, runningTask.cmd.Pid)
+		runningTask.cmd.Kill()
+	}
+
+	// Cancel the context
+	runningTask.cancel()
+
+	// Remove from running tasks
+	c.runningTasks.Delete(msg.ID)
+
+	// Send killed confirmation
+	c.send(Message{
+		Type: MsgTypeKilled,
+		ID:   msg.ID,
+	})
+
+	log.Printf("[Task %s] Task killed successfully", msg.ID)
 }
 
 func truncate(s string, n int) string {

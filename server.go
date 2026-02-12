@@ -99,6 +99,8 @@ func StartServer(config *Config) error {
 		}
 	}
 	bot.agentHub = NewAgentHub(config.AgentPassword, agentNotify, agentResult)
+	// Set callback for when agent tasks start (to send Kill button)
+	bot.agentHub.SetTaskStartCallback(bot.sendAgentTaskStartedMessage)
 	if config.AgentPassword != "" {
 		log.Println("Agent hub initialized (password protected)")
 	} else {

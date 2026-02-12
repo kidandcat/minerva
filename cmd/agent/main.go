@@ -50,11 +50,14 @@ func loadConfig() AgentConfig {
 const (
 	MsgRegister     = "register"
 	MsgTask         = "task"
+	MsgAck          = "ack"
 	MsgResult       = "result"
 	MsgPing         = "ping"
 	MsgPong         = "pong"
 	MsgListProjects = "list_projects"
 	MsgProjects     = "projects"
+	MsgKill         = "kill"
+	MsgKilled       = "killed"
 )
 
 // AgentMessage represents a message to/from Minerva
@@ -80,13 +83,14 @@ type AgentMessage struct {
 }
 
 type Agent struct {
-	name     string
-	relayURL string
-	password string
-	homeDir  string
-	conn     *websocket.Conn
-	mu       sync.Mutex
-	stopCh   chan struct{}
+	name         string
+	relayURL     string
+	password     string
+	homeDir      string
+	conn         *websocket.Conn
+	mu           sync.Mutex
+	stopCh       chan struct{}
+	activeTasks  sync.Map // taskID -> *exec.Cmd
 }
 
 func main() {
@@ -264,6 +268,9 @@ func (a *Agent) handleMessage(msg AgentMessage) {
 
 	case MsgTask:
 		go a.executeTask(msg)
+
+	case MsgKill:
+		a.killTask(msg.ID)
 	}
 }
 
@@ -295,8 +302,33 @@ func (a *Agent) executeTask(task AgentMessage) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	// Start the process
+	err := cmd.Start()
+	if err != nil {
+		// Send ACK with error
+		a.send(AgentMessage{
+			Type:  MsgAck,
+			ID:    task.ID,
+			Error: fmt.Sprintf("Failed to start claude: %v", err),
+		})
+		return
+	}
+
+	// Store the process so we can kill it later
+	a.activeTasks.Store(task.ID, cmd)
+
+	// Send ACK - process started successfully
+	a.send(AgentMessage{
+		Type: MsgAck,
+		ID:   task.ID,
+	})
+
+	// Wait for process to complete
+	err = cmd.Wait()
 	duration := time.Since(start).Milliseconds()
+
+	// Remove from active tasks
+	a.activeTasks.Delete(task.ID)
 
 	result := AgentMessage{
 		Type:     MsgResult,
@@ -321,6 +353,59 @@ func (a *Agent) executeTask(task AgentMessage) {
 
 	log.Printf("Task %s completed in %dms (exit=%d)", task.ID, duration, result.ExitCode)
 	a.send(result)
+}
+
+// killTask kills a running task by its ID
+func (a *Agent) killTask(taskID string) {
+	taskInfo, ok := a.activeTasks.Load(taskID)
+	if !ok {
+		log.Printf("Task %s not found (may have already completed)", taskID)
+		// Send killed confirmation anyway
+		a.send(AgentMessage{
+			Type:   MsgKilled,
+			ID:     taskID,
+			Output: "Task not found or already completed",
+		})
+		return
+	}
+
+	cmd, ok := taskInfo.(*exec.Cmd)
+	if !ok || cmd.Process == nil {
+		log.Printf("Task %s has no running process", taskID)
+		a.activeTasks.Delete(taskID)
+		a.send(AgentMessage{
+			Type:   MsgKilled,
+			ID:     taskID,
+			Output: "Task has no running process",
+		})
+		return
+	}
+
+	log.Printf("Killing task %s (PID: %d)", taskID, cmd.Process.Pid)
+
+	// Kill the process group to also kill any child processes
+	if err := cmd.Process.Kill(); err != nil {
+		log.Printf("Failed to kill task %s: %v", taskID, err)
+		a.send(AgentMessage{
+			Type:   MsgKilled,
+			ID:     taskID,
+			Error:  fmt.Sprintf("Failed to kill: %v", err),
+			Output: "Kill signal failed",
+		})
+		return
+	}
+
+	// Remove from active tasks
+	a.activeTasks.Delete(taskID)
+
+	// Send confirmation
+	a.send(AgentMessage{
+		Type:   MsgKilled,
+		ID:     taskID,
+		Output: "Task killed successfully",
+	})
+
+	log.Printf("Task %s killed successfully", taskID)
 }
 
 func (a *Agent) send(msg AgentMessage) error {

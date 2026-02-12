@@ -43,10 +43,11 @@ Minerva is a single Go binary that acts as a personal AI hub:
 - **System Prompts** — Customizable AI behavior per user via `/system`
 - **Context Window** — Configurable number of recent messages injected as conversation context
 
-### Reminders
-- **Persistent Reminders** — Schedule reminders with natural language or ISO8601 timestamps
-- **Smart Rescheduling** — AI autonomously decides whether to reschedule recurring/follow-up reminders
-- **Status Lifecycle** — `pending` → `fired` → `done`; only the user can dismiss
+### Scheduled Tasks
+- **Simple Reminders** — Schedule notifications via AI brain (no agent required)
+- **Autonomous Agent Tasks** — Schedule code tasks (deployments, builds) on specific agents
+- **Recurring Tasks** — Support for daily, weekly, and monthly recurring schedules
+- **Status Lifecycle** — `pending` → `running` → `completed`/`failed`
 
 ### Voice Calls (Telnyx + Gemini Live)
 - **Outbound Calls** — AI makes phone calls on your behalf (reservations, inquiries, etc.)
@@ -71,7 +72,7 @@ Minerva is a single Go binary that acts as a personal AI hub:
 
 ### Tools System
 The AI brain has access to these tools, callable during conversations:
-- `create_reminder` / `list_reminders` / `delete_reminder` / `reschedule_reminder`
+- `create_schedule` / `list_schedules` / `delete_schedule` — Schedule tasks and reminders
 - `update_memory` — Persistent user memory management
 - `send_email` — Send emails via Resend
 - `make_call` — Initiate phone calls via Telnyx
@@ -158,10 +159,12 @@ All configuration is via environment variables (or `.env` file). See [`.env.exam
 Minerva includes a CLI for direct interaction. This is also how the AI brain interacts with the system.
 
 ```bash
-# Reminders
-minerva reminder create "Buy groceries" --at "2025-02-06T10:00:00Z"
-minerva reminder list
-minerva reminder delete 1
+# Scheduled Tasks (reminders and autonomous agent tasks)
+minerva schedule create "Remind me to call mom" --at "2025-02-06T10:00:00Z"
+minerva schedule create "Deploy to production" --at "2025-02-06T18:00:00Z" --agent mac --dir /path/to/project
+minerva schedule list
+minerva schedule delete 1
+minerva schedule run 1  # Trigger immediately
 
 # Memory
 minerva memory get
@@ -245,7 +248,6 @@ WantedBy=multi-user.target
 | `/history` | List past conversations |
 | `/system <prompt>` | Set custom AI behavior |
 | `/memory` | View stored memory |
-| `/reminders` | List pending reminders |
 | `/tasks` | View background tasks |
 | `/status <id>` | Check task progress |
 | `/cancel <id>` | Cancel running task |

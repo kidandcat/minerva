@@ -86,6 +86,7 @@ minerva schedule create "Check email and summarize" --at "2026-02-12T09:00:00+01
 # Agent task: schedule code work on a connected agent
 minerva schedule create "Deploy vesper to production" --at "2026-02-10T18:00:00+01:00" --agent mac --dir ~/vesper
 
+
 # Recurring agent task
 minerva schedule create "Backup database" --at "2026-02-11T00:00:00+01:00" --agent vps --recurring daily
 
@@ -103,9 +104,14 @@ minerva schedule run <id>
 **No `--agent`**: Task fires to brain (you) — handle it by sending a message, taking action, etc.
 **With `--agent`**: Task dispatched to the named agent for autonomous execution.
 
+**Important:**
+- Without `--agent`: Simple reminder sent to AI brain (you) at the scheduled time
+- With `--agent`: Task dispatched to the specified agent for execution
+
 ## Instructions
 
 1. **Memory**: Use `minerva memory set` to remember important things about the user
+2. **Reminders**: When user asks to be reminded about something, use `minerva schedule create` WITHOUT --agent flag
 3. **Communication**: Use `minerva send` to send messages back (only if needed outside normal response)
 4. **Agents**: When user asks about code/projects, first check `minerva agent list` to see available projects, then use `minerva agent run` to execute tasks
 5. **Context**: Use `minerva context` if you need to see conversation history

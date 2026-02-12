@@ -22,6 +22,8 @@ const (
 	AgentMsgPong         = "pong"
 	AgentMsgListProjects = "list_projects"
 	AgentMsgProjects     = "projects"
+	AgentMsgKill         = "kill"
+	AgentMsgKilled       = "killed"
 )
 
 // AgentMessage represents a message to/from an agent
@@ -55,7 +57,14 @@ type Agent struct {
 	hub         *AgentHub
 	send        chan AgentMessage
 	connected   time.Time
-	activeTasks sync.Map // taskID -> time.Time (start time)
+	activeTasks sync.Map // taskID -> *ActiveTask
+}
+
+// ActiveTask holds information about a running task
+type ActiveTask struct {
+	StartTime time.Time
+	MessageID int  // Telegram message ID for the confirmation message with Kill button
+	ChatID    int64
 }
 
 // PendingProjectReq represents a request waiting for a project list response
@@ -71,6 +80,9 @@ type NotifyFunc func(message string)
 // ResultFunc is a callback for agent task results, processed through the AI brain
 type ResultFunc func(message string)
 
+// TaskStartFunc is a callback when an agent task starts (for sending Kill button)
+type TaskStartFunc func(taskID, agentName, prompt string)
+
 // PendingAck represents a request waiting for a task ack
 type PendingAck struct {
 	Result chan AgentMessage
@@ -82,9 +94,11 @@ type AgentHub struct {
 	projectReqs    map[string]*PendingProjectReq
 	pendingAcks    map[string]*PendingAck
 	disconnTimers  map[string]*time.Timer // debounce disconnect notifications
+	taskAgentMap   map[string]string      // taskID -> agentName
 	password       string
 	notify         NotifyFunc
 	onResult       ResultFunc
+	onTaskStart    TaskStartFunc
 	mu             sync.RWMutex
 	upgrader       websocket.Upgrader
 }
@@ -96,6 +110,7 @@ func NewAgentHub(password string, notify NotifyFunc, onResult ResultFunc) *Agent
 		projectReqs:   make(map[string]*PendingProjectReq),
 		pendingAcks:   make(map[string]*PendingAck),
 		disconnTimers: make(map[string]*time.Timer),
+		taskAgentMap:  make(map[string]string),
 		password:      password,
 		notify:        notify,
 		onResult:      onResult,
@@ -103,6 +118,13 @@ func NewAgentHub(password string, notify NotifyFunc, onResult ResultFunc) *Agent
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
+}
+
+// SetTaskStartCallback sets the callback for when an agent task starts
+func (h *AgentHub) SetTaskStartCallback(fn TaskStartFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onTaskStart = fn
 }
 
 // HandleWebSocket handles agent WebSocket connections
@@ -215,8 +237,17 @@ func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 
 	taskID := fmt.Sprintf("%d", time.Now().UnixNano())
 
-	// Track active task on this agent
-	agent.activeTasks.Store(taskID, time.Now())
+	// Track active task on this agent (will update with messageID after callback)
+	agent.activeTasks.Store(taskID, &ActiveTask{
+		StartTime: time.Now(),
+		MessageID: 0, // Will be set by callback after Telegram message sent
+		ChatID:    0, // Will be set by callback after Telegram message sent
+	})
+
+	// Store task -> agent mapping for kill functionality
+	h.mu.Lock()
+	h.taskAgentMap[taskID] = agentName
+	h.mu.Unlock()
 
 	// Register pending ack before sending
 	ackChan := make(chan AgentMessage, 1)
@@ -243,6 +274,9 @@ func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 	default:
 		cleanup()
 		agent.activeTasks.Delete(taskID)
+		h.mu.Lock()
+		delete(h.taskAgentMap, taskID)
+		h.mu.Unlock()
 		return "", fmt.Errorf("agent '%s' send channel full", agentName)
 	}
 
@@ -252,15 +286,124 @@ func (h *AgentHub) SendTask(agentName, prompt, dir string) (string, error) {
 		cleanup()
 		if ack.Error != "" {
 			agent.activeTasks.Delete(taskID)
+			h.mu.Lock()
+			delete(h.taskAgentMap, taskID)
+			h.mu.Unlock()
 			return "", fmt.Errorf("agent '%s' failed to start task: %s", agentName, ack.Error)
 		}
 		log.Printf("[Agent] Task %s ACK received from '%s' - Claude is running", taskID, agentName)
+
+		// Notify about task start (for Kill button)
+		h.mu.RLock()
+		onTaskStart := h.onTaskStart
+		h.mu.RUnlock()
+		if onTaskStart != nil {
+			onTaskStart(taskID, agentName, prompt)
+		}
+
 		return taskID, nil
 	case <-time.After(30 * time.Second):
 		cleanup()
 		agent.activeTasks.Delete(taskID)
+		h.mu.Lock()
+		delete(h.taskAgentMap, taskID)
+		h.mu.Unlock()
 		return "", fmt.Errorf("timeout waiting for agent '%s' to start task (30s)", agentName)
 	}
+}
+
+// UpdateTaskMessage updates the Telegram message ID for a task (for Kill button updates)
+func (h *AgentHub) UpdateTaskMessage(taskID string, messageID int, chatID int64) error {
+	h.mu.RLock()
+	agentName, ok := h.taskAgentMap[taskID]
+	h.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("task '%s' not found", taskID)
+	}
+
+	h.mu.RLock()
+	agent, ok := h.agents[agentName]
+	h.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("agent '%s' not found", agentName)
+	}
+
+	// Update the task info
+	if taskInfo, ok := agent.activeTasks.Load(taskID); ok {
+		if activeTask, ok := taskInfo.(*ActiveTask); ok {
+			activeTask.MessageID = messageID
+			activeTask.ChatID = chatID
+		}
+	}
+
+	return nil
+}
+
+// KillTask sends a kill signal to the agent running the specified task
+func (h *AgentHub) KillTask(taskID string) error {
+	h.mu.RLock()
+	agentName, ok := h.taskAgentMap[taskID]
+	h.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("task '%s' not found or already completed", taskID)
+	}
+
+	h.mu.RLock()
+	agent, ok := h.agents[agentName]
+	h.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("agent '%s' not connected", agentName)
+	}
+
+	// Send kill message to agent
+	killMsg := AgentMessage{
+		Type: AgentMsgKill,
+		ID:   taskID,
+	}
+
+	select {
+	case agent.send <- killMsg:
+		log.Printf("[AgentHub] Kill signal sent to agent '%s' for task %s", agentName, taskID)
+		// Remove from active tasks and task map
+		agent.activeTasks.Delete(taskID)
+		h.mu.Lock()
+		delete(h.taskAgentMap, taskID)
+		h.mu.Unlock()
+		return nil
+	default:
+		return fmt.Errorf("agent '%s' send channel full", agentName)
+	}
+}
+
+// GetTaskMessageID returns the Telegram message ID for a task (used to update the Kill button)
+func (h *AgentHub) GetTaskMessageID(taskID string) (int, int64, error) {
+	h.mu.RLock()
+	agentName, ok := h.taskAgentMap[taskID]
+	h.mu.RUnlock()
+
+	if !ok {
+		return 0, 0, fmt.Errorf("task not found")
+	}
+
+	h.mu.RLock()
+	agent, ok := h.agents[agentName]
+	h.mu.RUnlock()
+
+	if !ok {
+		return 0, 0, fmt.Errorf("agent not found")
+	}
+
+	if taskInfo, ok := agent.activeTasks.Load(taskID); ok {
+		if activeTask, ok := taskInfo.(*ActiveTask); ok {
+			return activeTask.MessageID, activeTask.ChatID, nil
+		}
+	}
+
+	return 0, 0, fmt.Errorf("task info not found")
 }
 
 func (h *AgentHub) registerAgent(agent *Agent, password string) bool {
@@ -322,7 +465,11 @@ func (h *AgentHub) handleResult(agentName string, msg AgentMessage) {
 	log.Printf("[AgentHub] Result from '%s': task=%s, exit=%d, output=%d bytes, error=%q, duration=%dms",
 		agentName, msg.ID, msg.ExitCode, len(msg.Output), msg.Error, msg.Duration)
 
-	// Remove from active tasks
+	// Remove from active tasks and task map
+	h.mu.Lock()
+	delete(h.taskAgentMap, msg.ID)
+	h.mu.Unlock()
+
 	h.mu.RLock()
 	if agent, ok := h.agents[agentName]; ok {
 		agent.activeTasks.Delete(msg.ID)
@@ -376,6 +523,17 @@ func (h *AgentHub) handleProjectsResult(msg AgentMessage) {
 	}
 }
 
+// handleKilled processes the killed confirmation from an agent
+func (h *AgentHub) handleKilled(agentName string, msg AgentMessage) {
+	log.Printf("[AgentHub] Task %s killed confirmation from agent '%s'", msg.ID, agentName)
+
+	// Notify via onResult callback so the brain knows it was killed
+	if h.onResult != nil {
+		text := fmt.Sprintf("[AGENT %s] Task killed by user", agentName)
+		h.onResult(text)
+	}
+}
+
 func (a *Agent) readPump() {
 	defer func() {
 		a.hub.unregisterAgent(a)
@@ -424,6 +582,9 @@ func (a *Agent) readPump() {
 
 		case AgentMsgProjects:
 			a.hub.handleProjectsResult(msg)
+
+		case AgentMsgKilled:
+			a.hub.handleKilled(a.Name, msg)
 
 		case AgentMsgPing:
 			// Respond with pong
