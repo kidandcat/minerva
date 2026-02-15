@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +26,7 @@ const (
 	AgentMsgProjects     = "projects"
 	AgentMsgKill         = "kill"
 	AgentMsgKilled       = "killed"
+	AgentMsgFileUpload   = "file_upload"
 )
 
 const (
@@ -54,6 +56,11 @@ type AgentMessage struct {
 	ExitCode int    `json:"exit_code,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Duration int64  `json:"duration_ms,omitempty"`
+
+	// File upload
+	FileName string `json:"file_name,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+	FileData string `json:"file_data,omitempty"` // base64 encoded
 }
 
 // Agent represents a connected agent
@@ -94,6 +101,9 @@ type ResultFunc func(message string)
 // TaskStartFunc is a callback when an agent task starts (for sending Kill button)
 type TaskStartFunc func(taskID, agentName, prompt string)
 
+// FileUploadFunc is a callback for receiving files from agents
+type FileUploadFunc func(agentName, fileName string, data []byte)
+
 // PendingAck represents a request waiting for a task ack
 type PendingAck struct {
 	Result chan AgentMessage
@@ -110,6 +120,7 @@ type AgentHub struct {
 	notify         NotifyFunc
 	onResult       ResultFunc
 	onTaskStart    TaskStartFunc
+	onFileUpload   FileUploadFunc
 	mu             sync.RWMutex
 	upgrader       websocket.Upgrader
 	stopWatchdog   chan struct{}
@@ -203,6 +214,13 @@ func (h *AgentHub) SetTaskStartCallback(fn TaskStartFunc) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onTaskStart = fn
+}
+
+// SetFileUploadCallback sets the callback for when an agent uploads a file
+func (h *AgentHub) SetFileUploadCallback(fn FileUploadFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onFileUpload = fn
 }
 
 // HandleWebSocket handles agent WebSocket connections
@@ -662,6 +680,29 @@ func (h *AgentHub) handleKilled(agentName string, msg AgentMessage) {
 	}
 }
 
+// handleFileUpload processes a file upload from an agent
+func (h *AgentHub) handleFileUpload(agentName string, msg AgentMessage) {
+	log.Printf("[AgentHub] File upload from '%s': %s (%d bytes)", agentName, msg.FileName, msg.FileSize)
+
+	h.mu.RLock()
+	onFileUpload := h.onFileUpload
+	h.mu.RUnlock()
+
+	if onFileUpload == nil {
+		log.Printf("[AgentHub] WARNING: onFileUpload callback is nil, dropping file %s", msg.FileName)
+		return
+	}
+
+	// Decode base64 data
+	data, err := base64.StdEncoding.DecodeString(msg.FileData)
+	if err != nil {
+		log.Printf("[AgentHub] Failed to decode file %s from agent '%s': %v", msg.FileName, agentName, err)
+		return
+	}
+
+	onFileUpload(agentName, msg.FileName, data)
+}
+
 func (a *Agent) readPump() {
 	defer func() {
 		a.hub.unregisterAgent(a)
@@ -719,6 +760,9 @@ func (a *Agent) readPump() {
 
 		case AgentMsgKilled:
 			a.hub.handleKilled(a.Name, msg)
+
+		case AgentMsgFileUpload:
+			a.hub.handleFileUpload(a.Name, msg)
 
 		case AgentMsgPing:
 			// Respond with pong

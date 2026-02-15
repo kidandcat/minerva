@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net"
@@ -29,6 +30,7 @@ const (
 	MsgTypeProjects     = "projects"
 	MsgTypeKill         = "kill"
 	MsgTypeKilled       = "killed"
+	MsgTypeFileUpload   = "file_upload"
 )
 
 var errConnNil = fmt.Errorf("connection is nil")
@@ -53,6 +55,11 @@ type Message struct {
 	ExitCode int    `json:"exit_code,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Duration int64  `json:"duration_ms,omitempty"`
+
+	// File upload
+	FileName string `json:"file_name,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+	FileData string `json:"file_data,omitempty"` // base64 encoded
 }
 
 // RunningTask represents a task that is currently executing
@@ -305,7 +312,7 @@ func (c *Client) handleTask(task Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
 	start := time.Now()
 
-	cmd, stdout, stderr, err := c.executor.Start(ctx, task.Prompt, dir)
+	cmd, stdout, stderr, err := c.executor.Start(ctx, task.ID, task.Prompt, dir)
 	if err != nil {
 		cancel()
 		// Send ACK with error - claude failed to start
@@ -372,6 +379,11 @@ func (c *Client) handleTask(task Message) {
 			return
 		}
 
+		// Collect and send output files before sending the result
+		if outputDir := c.executor.GetOutputDir(task.ID); outputDir != "" {
+			c.collectAndSendFiles(task.ID, outputDir)
+		}
+
 		msg := Message{
 			Type:     MsgTypeResult,
 			ID:       task.ID,
@@ -423,6 +435,65 @@ func (c *Client) handleKill(msg Message) {
 	})
 
 	log.Printf("[Task %s] Task killed successfully", msg.ID)
+}
+
+// collectAndSendFiles scans the output directory for files and sends them to the server
+func (c *Client) collectAndSendFiles(taskID, outputDir string) {
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[Task %s] Failed to read output dir %s: %v", taskID, outputDir, err)
+		}
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		filePath := filepath.Join(outputDir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			log.Printf("[Task %s] Failed to stat file %s: %v", taskID, filePath, err)
+			continue
+		}
+
+		// Skip files larger than 50MB (Telegram limit)
+		if info.Size() > 50*1024*1024 {
+			log.Printf("[Task %s] Skipping file %s: too large (%d bytes)", taskID, entry.Name(), info.Size())
+			continue
+		}
+
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Printf("[Task %s] Failed to read file %s: %v", taskID, filePath, err)
+			continue
+		}
+
+		encoded := base64.StdEncoding.EncodeToString(data)
+		msg := Message{
+			Type:     MsgTypeFileUpload,
+			ID:       taskID,
+			FileName: entry.Name(),
+			FileSize: info.Size(),
+			FileData: encoded,
+		}
+
+		log.Printf("[Task %s] Sending file: %s (%d bytes)", taskID, entry.Name(), info.Size())
+		if err := c.sendWithRetry(msg, 3); err != nil {
+			log.Printf("[Task %s] Failed to send file %s: %v", taskID, entry.Name(), err)
+		} else {
+			log.Printf("[Task %s] File %s sent successfully", taskID, entry.Name())
+		}
+	}
+
+	// Clean up the output directory
+	if err := os.RemoveAll(outputDir); err != nil {
+		log.Printf("[Task %s] Failed to clean output dir %s: %v", taskID, outputDir, err)
+	} else {
+		log.Printf("[Task %s] Cleaned output dir %s", taskID, outputDir)
+	}
 }
 
 func truncate(s string, n int) string {

@@ -101,6 +101,16 @@ func StartServer(config *Config) error {
 	bot.agentHub = NewAgentHub(config.AgentPassword, agentNotify, agentResult)
 	// Set callback for when agent tasks start (to send Kill button)
 	bot.agentHub.SetTaskStartCallback(bot.sendAgentTaskStartedMessage)
+	// Set callback for file uploads from agents
+	bot.agentHub.SetFileUploadCallback(func(agentName, fileName string, data []byte) {
+		if config.AdminID != 0 {
+			log.Printf("[Agent] Received file '%s' from agent '%s' (%d bytes), sending to Telegram", fileName, agentName, len(data))
+			if err := bot.sendDocument(config.AdminID, fileName, data); err != nil {
+				log.Printf("[Agent] Failed to send file '%s' to Telegram: %v", fileName, err)
+				bot.sendMessage(config.AdminID, fmt.Sprintf("Failed to send file '%s' from agent '%s': %v", fileName, agentName, err))
+			}
+		}
+	})
 	if config.AgentPassword != "" {
 		log.Println("Agent hub initialized (password protected)")
 	} else {
